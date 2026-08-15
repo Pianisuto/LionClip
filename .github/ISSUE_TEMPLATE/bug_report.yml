@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible LionClip problem
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. **Do not paste sensitive clipboard contents.**
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem without including sensitive clipboard data.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start LionClip...
+        2. Copy non-sensitive test text...
+        3. Press Super+V...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and version
+      placeholder: Zorin OS / Ubuntu version
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop environment
+      placeholder: GNOME
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Session type
+      options:
+        - Wayland
+        - X11
+        - Unknown
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LionClip version or commit
+      placeholder: tag or git commit
+  - type: textarea
+    id: logs
+    attributes:
+      label: Non-sensitive diagnostics
+      description: Remove clipboard payloads, secrets and personal data before posting logs.
+      render: shell

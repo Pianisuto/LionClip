@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an improvement that fits LionClip's focused product scope
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        LionClip intentionally has a small scope. Please explain the workflow problem before proposing implementation details.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / workflow
+      description: What clipboard workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should LionClip do differently?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request is directly related to clipboard history or its desktop interaction.
+          required: true

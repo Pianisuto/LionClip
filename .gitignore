@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Keep Cargo.lock once LionClip becomes an application crate.
+# Remove the Cargo.lock rule during project initialization and commit the lockfile.
+
+# IDE/editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Local test/runtime data
+.lionclip-data/
+coverage/
