@@ -12,6 +12,7 @@ pub fn build(application: &adw::Application) -> PlacementPopup {
         .title("LionClip placement test")
         .default_width(430)
         .default_height(250)
+        .decorated(false)
         .resizable(false)
         .build();
 
@@ -24,6 +25,7 @@ pub fn build(application: &adw::Application) -> PlacementPopup {
     let description = gtk::Label::builder()
         .label("Move the pointer before opening this window, then check whether the popup appears nearby.")
         .halign(gtk::Align::Start)
+        .max_width_chars(30)
         .wrap(true)
         .xalign(0.0)
         .build();
@@ -32,6 +34,7 @@ pub fn build(application: &adw::Application) -> PlacementPopup {
     let placement_label = gtk::Label::builder()
         .label("Positioning: waiting for the window to map…")
         .halign(gtk::Align::Start)
+        .max_width_chars(30)
         .wrap(true)
         .xalign(0.0)
         .build();

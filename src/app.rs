@@ -1,5 +1,3 @@
-use std::{cell::Cell, rc::Rc};
-
 use adw::prelude::*;
 use gtk::glib;
 
@@ -29,23 +27,17 @@ fn activate(application: &adw::Application) {
     let diagnostics = SessionDiagnostics::collect();
     println!("{}", diagnostics.log_line());
 
-    let positioner = Rc::new(Positioner::new(diagnostics.backend()));
-    let placement_attempted = Rc::new(Cell::new(false));
+    let positioner = Positioner::new(diagnostics.backend());
 
-    popup.window.connect_map({
-        let positioner = Rc::clone(&positioner);
-        let placement_attempted = Rc::clone(&placement_attempted);
+    popup.window.add_tick_callback({
         let placement_label = popup.placement_label.clone();
 
-        move |window| {
-            if placement_attempted.replace(true) {
-                return;
-            }
-
+        move |window, _| {
             let outcome = positioner.place(window);
             println!("{}", outcome.log_line());
             placement_label.set_label(&outcome.display_text());
             apply_outcome_style(&placement_label, &outcome);
+            glib::ControlFlow::Break
         }
     });
 
