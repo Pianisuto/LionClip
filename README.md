@@ -12,9 +12,17 @@ The project intentionally avoids becoming a large automation or scripting platfo
 
 **Early development / technical validation.**
 
-The first milestone is a technical spike proving that LionClip can provide the desired popup experience on Zorin OS, including the difficult part: positioning the popup near the pointer while running on a GNOME Wayland session.
+Phase 0 now contains a technical spike for the desired popup experience. Native
+GNOME Wayland uses a safe compositor-managed fallback, while an isolated
+X11/XWayland experiment attempts pointer-relative placement with monitor-edge
+clamping. The experiment still requires classification on the primary Zorin
+machine before the positioning approach is considered validated.
 
 Do not expect a usable release yet.
+
+See [`docs/PHASE0_VALIDATION.md`](docs/PHASE0_VALIDATION.md) for native build
+dependencies, positioning diagnostics, and the exact Zorin Wayland/XWayland
+manual test matrix.
 
 ## Product principles
 
@@ -92,6 +100,10 @@ Development is intentionally incremental. Each phase must leave behind something
 Agents and contributors should read [`AGENTS.md`](AGENTS.md) before changing the project. Claude-based agents should also read [`CLAUDE.md`](CLAUDE.md).
 
 The implementation roadmap and copy-paste prompts for coding agents live in [`docs/CODEX_PROMPTS.md`](docs/CODEX_PROMPTS.md).
+
+For the current Phase 0 spike, install the native packages and run the required
+Rust checks as documented in
+[`docs/PHASE0_VALIDATION.md`](docs/PHASE0_VALIDATION.md).
 
 ## Target environment
 
