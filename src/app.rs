@@ -1,9 +1,13 @@
+use std::{cell::RefCell, rc::Rc};
+
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gdk, gio, glib};
 
 use crate::{
-    popup,
-    positioning::{PlacementOutcome, Positioner, SessionDiagnostics},
+    clipboard::{ClipboardService, ClipboardWriter, HistoryChangedCallback},
+    history::TextHistory,
+    popup::{self, HistoryPopup},
+    positioning::{Positioner, SessionDiagnostics},
 };
 
 const APPLICATION_ID: &str = "io.github.Pianisuto.LionClip";
@@ -12,45 +16,89 @@ pub fn run() -> glib::ExitCode {
     let application = adw::Application::builder()
         .application_id(APPLICATION_ID)
         .build();
+    let state = Rc::new(RefCell::new(None));
 
-    application.connect_activate(activate);
-    application.run()
-}
+    application.connect_activate({
+        let state = state.clone();
 
-fn activate(application: &adw::Application) {
-    if let Some(window) = application.active_window() {
-        window.present();
-        return;
-    }
+        move |application| {
+            if state.borrow().is_none() {
+                let Some(new_state) = AppState::new(application) else {
+                    eprintln!("lionclip: graphical display unavailable");
+                    application.quit();
+                    return;
+                };
+                *state.borrow_mut() = Some(new_state);
+            }
 
-    let popup = popup::build(application);
-    let diagnostics = SessionDiagnostics::collect();
-    println!("{}", diagnostics.log_line());
-
-    let positioner = Positioner::new(&diagnostics);
-
-    popup.window.add_tick_callback({
-        let placement_label = popup.placement_label.clone();
-
-        move |window, _| {
-            let outcome = positioner.place(window);
-            println!("{}", outcome.log_line());
-            placement_label.set_label(&outcome.display_text());
-            apply_outcome_style(&placement_label, &outcome);
-            glib::ControlFlow::Break
+            if let Some(state) = state.borrow().as_ref() {
+                state.show_popup();
+            }
         }
     });
 
-    popup.window.present();
+    application.run()
 }
 
-fn apply_outcome_style(label: &gtk::Label, outcome: &PlacementOutcome) {
-    label.remove_css_class("accent");
-    label.remove_css_class("warning");
+struct AppState {
+    popup: Rc<HistoryPopup>,
+    positioner: Positioner,
+    _clipboard_service: ClipboardService,
+    _hold: gio::ApplicationHoldGuard,
+}
 
-    if outcome.used_pointer_placement() {
-        label.add_css_class("accent");
-    } else {
-        label.add_css_class("warning");
+impl AppState {
+    fn new(application: &adw::Application) -> Option<Self> {
+        let display = gdk::Display::default()?;
+        let diagnostics = SessionDiagnostics::collect();
+        println!("{}", diagnostics.log_line());
+
+        let history = Rc::new(RefCell::new(TextHistory::default()));
+        let history_changed: HistoryChangedCallback = Rc::new(RefCell::new(None));
+        let clipboard_service = ClipboardService::start(
+            display.clipboard(),
+            history.clone(),
+            history_changed.clone(),
+        );
+        let writer: ClipboardWriter = clipboard_service.writer();
+
+        let popup = Rc::new(popup::build(application, {
+            let history = history.clone();
+
+            move |id| {
+                if let Some(item) = history.borrow().item(id) {
+                    writer.restore_text(item.text());
+                }
+            }
+        }));
+
+        *history_changed.borrow_mut() = Some(Box::new({
+            let history = history.clone();
+            let popup = popup.clone();
+
+            move || popup.render(history.borrow().items())
+        }));
+
+        popup.render(history.borrow().items());
+
+        Some(Self {
+            popup,
+            positioner: Positioner::new(&diagnostics),
+            _clipboard_service: clipboard_service,
+            _hold: application.hold(),
+        })
+    }
+
+    fn show_popup(&self) {
+        if !self.popup.window.is_visible() {
+            let positioner = self.positioner.clone();
+            self.popup.window.add_tick_callback(move |window, _| {
+                let outcome = positioner.place(window);
+                println!("{}", outcome.log_line());
+                glib::ControlFlow::Break
+            });
+        }
+
+        self.popup.present();
     }
 }

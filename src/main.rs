@@ -1,4 +1,6 @@
 mod app;
+mod clipboard;
+mod history;
 mod popup;
 mod positioning;
 
