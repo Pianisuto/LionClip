@@ -1,10 +1,8 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
 
-# Keep Cargo.lock once LionClip becomes an application crate.
-# Remove the Cargo.lock rule during project initialization and commit the lockfile.
+# LionClip is an application, so Cargo.lock should be committed once Cargo is initialized.
 
 # IDE/editor
 .idea/
