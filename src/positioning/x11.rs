@@ -1,0 +1,119 @@
+use gdk4_x11::X11Surface;
+use gtk::prelude::*;
+use x11rb::{
+    connection::Connection,
+    protocol::{
+        randr::ConnectionExt as _,
+        xproto::{ConfigureWindowAux, ConnectionExt as _},
+    },
+};
+
+use super::{
+    PlacementOutcome, X11PathStatus,
+    geometry::{Point, Rect, Size, clamp_popup_origin, monitor_at_pointer},
+};
+
+const POINTER_OFFSET: i32 = 16;
+const MONITOR_MARGIN: i32 = 12;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PositionError {
+    SurfaceUnavailable,
+    Connection,
+    Query,
+    Placement,
+}
+
+pub fn place_near_pointer(
+    window: &adw::ApplicationWindow,
+    status: X11PathStatus,
+) -> Result<PlacementOutcome, PositionError> {
+    let surface = window
+        .surface()
+        .and_then(|surface| surface.downcast::<X11Surface>().ok())
+        .ok_or(PositionError::SurfaceUnavailable)?;
+    let xid = surface
+        .xid()
+        .try_into()
+        .map_err(|_| PositionError::SurfaceUnavailable)?;
+
+    let (connection, screen_number) =
+        x11rb::connect(None).map_err(|_| PositionError::Connection)?;
+    let screen = connection
+        .setup()
+        .roots
+        .get(screen_number)
+        .ok_or(PositionError::Query)?;
+
+    let pointer_reply = connection
+        .query_pointer(screen.root)
+        .map_err(|_| PositionError::Query)?
+        .reply()
+        .map_err(|_| PositionError::Query)?;
+    let pointer = Point {
+        x: i32::from(pointer_reply.root_x),
+        y: i32::from(pointer_reply.root_y),
+    };
+
+    let window_geometry = connection
+        .get_geometry(xid)
+        .map_err(|_| PositionError::Query)?
+        .reply()
+        .map_err(|_| PositionError::Query)?;
+    let popup_size = Size {
+        width: i32::from(window_geometry.width),
+        height: i32::from(window_geometry.height),
+    };
+
+    let monitors = query_monitors(&connection, screen.root).unwrap_or_else(|| {
+        vec![Rect {
+            x: 0,
+            y: 0,
+            width: i32::from(screen.width_in_pixels),
+            height: i32::from(screen.height_in_pixels),
+        }]
+    });
+    let monitor = monitor_at_pointer(&monitors, pointer).ok_or(PositionError::Query)?;
+    let desired = Point {
+        x: pointer.x.saturating_add(POINTER_OFFSET),
+        y: pointer.y.saturating_add(POINTER_OFFSET),
+    };
+    let origin = clamp_popup_origin(desired, popup_size, monitor, MONITOR_MARGIN);
+
+    connection
+        .configure_window(xid, &ConfigureWindowAux::new().x(origin.x).y(origin.y))
+        .map_err(|_| PositionError::Placement)?
+        .check()
+        .map_err(|_| PositionError::Placement)?;
+    connection.flush().map_err(|_| PositionError::Placement)?;
+
+    Ok(PlacementOutcome::X11Pointer {
+        x: origin.x,
+        y: origin.y,
+        monitor,
+        status,
+    })
+}
+
+fn query_monitors<C: Connection>(connection: &C, root: u32) -> Option<Vec<Rect>> {
+    let reply = connection
+        .randr_get_monitors(root, true)
+        .ok()?
+        .reply()
+        .ok()?;
+    let monitors: Vec<_> = reply
+        .monitors
+        .into_iter()
+        .filter_map(|monitor| {
+            let rect = Rect {
+                x: i32::from(monitor.x),
+                y: i32::from(monitor.y),
+                width: i32::from(monitor.width),
+                height: i32::from(monitor.height),
+            };
+            (rect.width > 0 && rect.height > 0).then_some(rect)
+        })
+        .collect();
+
+    (!monitors.is_empty()).then_some(monitors)
+}

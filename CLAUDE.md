@@ -14,7 +14,7 @@ Read, in order:
 - Do not redesign the project before understanding the current roadmap phase.
 - Prefer a small, working vertical slice over a broad partial implementation.
 - Do not assume GNOME Wayland permits arbitrary global pointer coordinates or top-level window positioning.
-- Treat X11/XWayland positioning as an isolated experiment until validated on the target Zorin OS machine.
+- Preserve the validated, isolated X11 positioning backend on the primary Zorin target; treat only XWayland positioning as experimental until it is validated in a real Wayland session.
 - Keep UI in GTK4/Libadwaita and avoid introducing a second UI stack.
 - Do not add framework-style abstractions for hypothetical future needs.
 - Never log clipboard payloads.

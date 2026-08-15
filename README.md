@@ -10,11 +10,19 @@ The project intentionally avoids becoming a large automation or scripting platfo
 
 ## Status
 
-**Early development / technical validation.**
+**Early development / Phase 0 complete.**
 
-The first milestone is a technical spike proving that LionClip can provide the desired popup experience on Zorin OS, including the difficult part: positioning the popup near the pointer while running on a GNOME Wayland session.
+Phase 0 validated pointer-relative popup placement on the real target machine:
+Zorin OS with GNOME/X11. Native GNOME Wayland uses a safe compositor-managed
+fallback because exact top-level placement is unavailable through the current
+approach. XWayland inside a Wayland session remains experimental and has not
+yet been validated.
 
 Do not expect a usable release yet.
+
+See [`docs/PHASE0_VALIDATION.md`](docs/PHASE0_VALIDATION.md) for native build
+dependencies, the recorded Phase 0 result, positioning diagnostics, and the
+optional Wayland/XWayland test matrix.
 
 ## Product principles
 
@@ -33,9 +41,11 @@ Do not expect a usable release yet.
 - **Libadwaita / libadwaita-rs** — GNOME-native visuals and preferences
 - **GLib / GIO** — application lifecycle and single-instance command handling
 - **SQLite** — local clipboard history persistence
-- **x11rb** — X11/XWayland pointer/window experiments where needed
+- **x11rb** — validated X11 positioning and isolated XWayland experiments
 
-The exact positioning strategy is deliberately not considered settled until the technical spike is validated on a real Zorin OS Wayland session.
+The V1 positioning strategy is settled for the primary GNOME/X11 target. The
+Wayland fallback and experimental XWayland path remain isolated so they can
+improve without destabilizing validated X11 behavior.
 
 ## Intended V1
 
@@ -77,8 +87,9 @@ LionClip
 ├── Popup UI
 │   └── GTK4 + Libadwaita presentation and interaction
 ├── Positioning backend
-│   ├── X11/XWayland experiment
-│   └── safe Wayland fallback
+│   ├── validated X11 placement
+│   ├── experimental XWayland placement
+│   └── compositor-managed Wayland fallback
 └── Settings / application lifecycle
     └── GApplication, autostart and preferences
 ```
@@ -93,13 +104,20 @@ Agents and contributors should read [`AGENTS.md`](AGENTS.md) before changing the
 
 The implementation roadmap and copy-paste prompts for coding agents live in [`docs/CODEX_PROMPTS.md`](docs/CODEX_PROMPTS.md).
 
+For the completed Phase 0 spike, install the native packages and review the
+recorded platform result as documented in
+[`docs/PHASE0_VALIDATION.md`](docs/PHASE0_VALIDATION.md).
+
 ## Target environment
 
 Primary validation environment:
 
 - Zorin OS based on Ubuntu 24.04 (`noble`)
 - GNOME desktop
-- Wayland session, with XWayland available where the system provides it
+- X11 session
+
+Native Wayland remains a supported fallback environment. XWayland inside a
+Wayland session remains experimental and is not a V1 validation requirement.
 
 Support for other Linux desktops is welcome later, but must not compromise the small and reliable V1 for the primary environment.
 

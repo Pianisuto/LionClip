@@ -35,7 +35,7 @@ V1 should prefer a **single resident process**.
                               v
                      Positioning backend
                        |             |
-                     X11          fallback
+                X11 (validated)   fallback
 ```
 
 A second helper process, GNOME Shell extension, daemon, or privileged component must not be introduced unless a measured technical limitation requires it and the decision is documented.
@@ -191,7 +191,11 @@ This is the primary architecture risk.
 
 ### Constraints
 
-GNOME Wayland does not give ordinary clients the same global window-positioning model as X11. Therefore the product requirement “open near the pointer” must be proven, not assumed.
+The primary V1 target is Zorin GNOME/X11, where Phase 0 validated reliable
+pointer-relative placement. GNOME Wayland does not give ordinary clients the
+same global window-positioning model as X11, so native Wayland uses
+compositor-managed fallback placement. Running the X11 backend through
+XWayland in a Wayland session remains experimental.
 
 ### Backend boundary
 
@@ -205,17 +209,22 @@ trait PopupPositioner {
 
 The final API should follow what GTK/GDK actually permits; do not force this exact signature.
 
-### Phase 0 experiment
+### Phase 0 result
 
-Validate, in order:
+Phase 0 established these backend outcomes:
 
-1. active session/backend detection;
-2. whether a GTK4/Libadwaita popup can reliably appear near the current pointer in the target Zorin setup;
-3. whether an X11/XWayland backend can provide reliable pointer coordinates and placement without breaking clipboard behavior;
-4. edge clamping across monitor boundaries;
-5. a predictable fallback if exact positioning is impossible.
+- **GNOME/X11 — working:** validated on the real target Zorin machine with
+  pointer-relative placement and multi-monitor edge clamping.
+- **Native GNOME Wayland — exact placement not available:** the current GTK/GDK
+  path cannot choose absolute top-level coordinates, so LionClip uses a safe
+  compositor-managed fallback.
+- **XWayland in a Wayland session — experimental:** the isolated X11 backend is
+  retained for this route, but it has not been validated in a real Wayland
+  session.
 
-Do not add a GNOME Shell extension during the spike unless the other approaches have been demonstrated insufficient.
+The primary X11 result satisfies the V1 placement requirement. Phase 1 is not
+blocked on Wayland or XWayland validation. Do not add a GNOME Shell extension
+without an explicit future roadmap decision.
 
 ## Search
 

@@ -23,10 +23,14 @@ The primary validation environment is:
 
 - Zorin OS based on Ubuntu 24.04 (`noble`);
 - GNOME desktop;
-- Wayland session;
-- XWayland may be present and may be used only behind an isolated platform backend if technically justified.
+- X11 session.
 
-Do not claim Wayland behavior is solved without validating it on the real target environment.
+Phase 0 validated pointer-relative popup placement on this real GNOME/X11
+target. Native GNOME Wayland remains supported through compositor-managed
+fallback placement because the current approach cannot set exact top-level
+coordinates there. XWayland inside a Wayland session remains experimental and
+unvalidated. Do not present either Wayland path as equivalent to the validated
+X11 path without real session testing.
 
 ## 3. Technology direction
 
@@ -38,7 +42,7 @@ Unless a roadmap phase explicitly changes this decision, use:
 - GLib/GIO for application lifecycle and single-instance behavior;
 - GDK clipboard APIs for clipboard interaction where viable;
 - SQLite for persistence once persistence is introduced;
-- `x11rb` only for explicitly isolated X11/XWayland positioning experiments or backend code.
+- `x11rb` only inside the isolated, validated X11 positioning backend and related XWayland experiments.
 
 Avoid Electron, Tauri, webviews, Node runtimes, Python daemons, or a second UI toolkit.
 
@@ -64,18 +68,16 @@ Important boundaries:
 - Do not introduce abstractions merely to satisfy patterns. Add an interface/trait when there are genuinely multiple behaviors, platform backends, or a test seam that materially helps.
 - Do not build infrastructure for hypothetical future features.
 
-## 5. Wayland/X11 rule
+## 5. X11/Wayland rule
 
 Popup positioning is the main technical risk.
 
-Treat all pointer-relative positioning approaches as experimental until Phase 0 is validated.
+Phase 0 established the platform policy for V1:
 
-The desired order is:
-
-1. use a reliable native mechanism if one exists for the active backend;
-2. test an isolated X11/XWayland positioning backend if appropriate;
-3. provide a safe fallback, such as showing on the active monitor in a predictable position;
-4. only consider a GNOME-specific helper/extension if the first three approaches cannot satisfy the product requirement.
+1. use the validated, isolated X11 backend on the primary GNOME/X11 target;
+2. use compositor-managed fallback placement on native GNOME Wayland;
+3. keep XWayland positioning isolated and experimental until it is validated in a real Wayland session;
+4. consider a GNOME-specific helper/extension only after an explicit future roadmap decision.
 
 Never scatter `GDK_BACKEND`, X11 calls, compositor assumptions, or shell-specific code across application modules.
 

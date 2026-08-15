@@ -11,7 +11,7 @@ Implement LionClip Roadmap Phase 0 only.
 
 Read AGENTS.md, docs/ARCHITECTURE.md and docs/ROADMAP.md before changing anything.
 
-Goal: prove the riskiest technical requirement on Zorin OS / GNOME Wayland before implementing clipboard history: a small GTK4 + Libadwaita popup that attempts to open near the current pointer, with a reliable fallback when exact placement is unavailable.
+Goal: prove the riskiest technical requirement on the primary Zorin OS / GNOME X11 target before implementing clipboard history: a small GTK4 + Libadwaita popup that opens near the current pointer, while retaining a reliable fallback when exact placement is unavailable on secondary backends.
 
 Requirements:
 - initialize a clean Rust stable project using GTK4/gtk4-rs and Libadwaita/libadwaita-rs;
@@ -19,7 +19,7 @@ Requirements:
 - create a small visually polished test popup using native Libadwaita styling;
 - detect/report relevant session/backend diagnostics without sensitive data;
 - isolate positioning behavior behind a small boundary so X11/XWayland-specific code does not leak into UI code;
-- investigate and implement the smallest viable X11/XWayland pointer/placement experiment if the current APIs/environment support it;
+- implement the smallest viable isolated X11 pointer/placement backend and retain the same boundary for XWayland experiments if supported;
 - clamp placement so the popup does not intentionally open off-screen;
 - if pointer-relative placement cannot be guaranteed, implement a predictable fallback rather than failing;
 - do not add a GNOME Shell extension unless you can demonstrate why the simpler approaches are insufficient; if it cannot be validated in your environment, leave it out;
@@ -33,7 +33,7 @@ Before finishing run cargo fmt --check, cargo clippy --all-targets --all-feature
 Deliver:
 1. working Phase 0 code;
 2. concise documentation of the positioning strategy actually implemented;
-3. exact manual test steps for my Zorin Wayland machine;
+3. exact manual test steps for the primary Zorin GNOME/X11 machine and optional secondary-backend checks;
 4. what output/log line tells me which positioning backend/fallback was used;
 5. known limitations and what I should report back after testing.
 
