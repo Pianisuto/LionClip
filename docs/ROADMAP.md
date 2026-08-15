@@ -4,6 +4,8 @@ The roadmap is organized as **vertical, testable phases**. Do not implement late
 
 ## Phase 0 — Technical spike: popup placement
 
+**Status: complete.** Validated on the primary Zorin GNOME/X11 target.
+
 ### Goal
 
 Prove the riskiest interaction before investing in the clipboard/history architecture.
@@ -15,23 +17,38 @@ Prove the riskiest interaction before investing in the clipboard/history archite
 - a small test popup;
 - session/backend diagnostics that do not expose sensitive data;
 - positioning abstraction kept minimal;
-- X11/XWayland experiment if appropriate;
-- pointer-relative placement attempt;
+- isolated X11 backend, also retained for XWayland experiments;
+- pointer-relative placement on X11;
 - monitor-edge clamping;
 - predictable fallback placement.
 
 ### Visual result
 
-Invoking the app should show a small Libadwaita test popup. On the primary Zorin machine, the test must make it obvious whether the popup is actually near the pointer or using fallback placement.
+Invoking the app shows a small Libadwaita test popup. On the primary Zorin
+GNOME/X11 machine, it opens near the pointer and remains within the active
+monitor. On native Wayland it identifies compositor-managed fallback placement.
 
 ### Acceptance
 
-- builds on the target Zorin OS machine;
-- popup opens reliably;
-- active backend/session is reported for diagnostics;
-- no crashes when exact positioning is unavailable;
-- exact pointer-relative placement is classified as `working`, `unreliable`, or `not available` based on real testing;
-- chosen approach and limitations are documented before Phase 1.
+- [x] builds on the target Zorin OS machine;
+- [x] popup opens reliably;
+- [x] active backend/session is reported for diagnostics;
+- [x] no crashes when exact positioning is unavailable;
+- [x] GNOME/X11 pointer-relative placement is classified as `working` based on real testing;
+- [x] native GNOME Wayland exact placement is classified as `not available` through the current approach and uses fallback;
+- [x] XWayland is explicitly classified as `experimental` and unvalidated;
+- [x] chosen approach and limitations are documented before Phase 1.
+
+### Conclusion
+
+- **GNOME/X11:** working and validated on the real target machine. This is the
+  primary V1 validation environment.
+- **Native GNOME Wayland:** exact pointer-relative top-level placement is not
+  available through the current approach; compositor fallback remains.
+- **XWayland inside a Wayland session:** experimental and not yet validated.
+
+Wayland/XWayland validation is not a prerequisite for starting Phase 1. The
+fallback and experimental backend remain in place.
 
 ---
 

@@ -1,26 +1,70 @@
-# Phase 0 popup-placement validation
+# Phase 0 popup-placement result
 
-Phase 0 is a technical spike, not a clipboard manager. It opens a small test
-window, reports the active GTK backend, and makes the positioning path visible
-both in the window and in the terminal.
+Phase 0 is complete. It validated the riskiest LionClip interaction before
+clipboard history work: a compact GTK4/Libadwaita popup that opens near the
+pointer on the primary target and falls back safely when exact placement is not
+available.
+
+## Conclusion
+
+| Environment | Phase 0 result | V1 policy |
+| --- | --- | --- |
+| Zorin GNOME/X11 | **Working and validated on the real target machine** | Primary V1 validation target |
+| Native GNOME Wayland | **Exact pointer-relative top-level placement unavailable through the current approach** | Keep compositor-managed fallback |
+| XWayland inside a Wayland session | **Experimental and not yet validated** | Keep isolated backend; do not depend on it for V1 |
+
+The successful X11 result completes the Phase 0 requirement. Phase 1 is not
+blocked on native Wayland or XWayland validation. Neither secondary path was
+removed.
 
 ## Positioning strategy
 
-GTK/GDK clients cannot choose absolute top-level window coordinates on GNOME
-Wayland. LionClip therefore uses these two deliberately isolated paths:
+LionClip keeps platform behavior behind the positioning boundary:
 
-1. **Native Wayland or unsupported GDK backend:** show the window normally and
-   let the compositor place it. This is the safe fallback; the diagnostic line
-   reports `backend=compositor-fallback status=not-available`.
-2. **X11, including an explicitly selected XWayland GTK backend:** after the
-   GTK surface maps, query the X11 root pointer and active RandR monitor, offset
-   the popup from the pointer, clamp it within that monitor, and send one X11
-   configure request. The diagnostic line reports
-   `backend=x11-pointer status=experimental`.
+1. **GNOME/X11:** after the first rendered frame, query the X11 root pointer
+   and active RandR monitor, offset the popup from the pointer, clamp it within
+   that monitor, and send one X11 configure request. On an X11 session the log
+   reports `backend=x11-pointer status=working`.
+2. **Native GNOME Wayland:** show the window normally and let the compositor
+   place it because GTK/GDK does not expose absolute top-level placement there.
+   The log reports `backend=compositor-fallback status=not-available`.
+3. **XWayland:** retain the same isolated X11 implementation when GTK is
+   explicitly run with its X11 backend inside a Wayland session. This route is
+   not yet validated and reports `backend=x11-pointer status=experimental`.
 
 X11 code exists only in `src/positioning/x11.rs`. A failed connection, query,
 or configure request falls back without terminating the application. Phase 0
 does not add polling, a helper process, or a GNOME Shell extension.
+
+## Recorded real-machine validation
+
+The real target validation used:
+
+- Zorin OS based on Ubuntu 24.04 (`noble`);
+- GNOME desktop;
+- `XDG_SESSION_TYPE=x11` and `GdkX11Display`;
+- two 2560×1440 monitors arranged side by side.
+
+Observed results:
+
+- the popup opened near the pointer reliably;
+- the undecorated popup measured 430×250 px;
+- center placements matched the pointer plus the configured 16 px offset;
+- top, left, right, and bottom monitor edges were clamped successfully on both
+  monitors;
+- GNOME/X11 additionally respected the reserved panel work area at the lower
+  edge;
+- `Esc` closed every run;
+- no crashes occurred and no sensitive clipboard data was logged.
+
+Representative diagnostics:
+
+```text
+lionclip: diagnostics session=x11 gdk_backend=x11 gdk_display_type=GdkX11Display
+lionclip: placement backend=x11-pointer status=working result=placed x=... y=... monitor=...x...+...+...
+```
+
+This evidence classifies GNOME/X11 as **working** on the primary target.
 
 ## Ubuntu/Zorin Noble setup
 
@@ -48,105 +92,68 @@ cargo test
 cargo build
 ```
 
-## Manual validation on Zorin GNOME Wayland
+## Reproduce the primary X11 validation
 
-Run every command below from a terminal inside the graphical desktop session.
-Do not run them over SSH.
+Run from a terminal inside the graphical desktop session, not over SSH.
 
-### 1. Record the non-sensitive environment
+1. Confirm the session and start LionClip:
 
-```bash
-printf 'session=%s wayland=%s display=%s\n' \
-  "$XDG_SESSION_TYPE" "${WAYLAND_DISPLAY:-unset}" "${DISPLAY:-unset}"
-gnome-shell --version
-```
+   ```bash
+   printf 'session=%s display=%s\n' "$XDG_SESSION_TYPE" "${DISPLAY:-unset}"
+   env -u GDK_BACKEND cargo run 2>&1 | tee /tmp/lionclip-x11.log
+   ```
 
-Confirm that `session=wayland`. The display socket names are useful platform
-diagnostics and contain no clipboard data.
+2. Confirm `session=x11`, `gdk_backend=x11`, and
+   `backend=x11-pointer status=working` in the output.
+3. Repeat after placing the pointer at the center and near every corner of each
+   monitor. Close with `Esc` between runs.
+4. Confirm the popup stays near the pointer when space permits and remains
+   fully visible at monitor edges.
 
-### 2. Validate the native Wayland fallback
+## Optional secondary-backend checks
 
-Make sure `GDK_BACKEND` is not set. Move the pointer to a memorable position,
-then run:
+These checks can improve secondary-platform knowledge but do not block Phase 1.
+
+### Native Wayland fallback
+
+From a real GNOME Wayland session, run:
 
 ```bash
 env -u GDK_BACKEND cargo run 2>&1 | tee /tmp/lionclip-wayland.log
 ```
 
-Expected result:
-
-- the popup opens reliably and closes with `Esc`;
-- its status text says `compositor-managed fallback`;
-- the terminal contains lines like:
+Expected diagnostics:
 
 ```text
 lionclip: diagnostics session=wayland gdk_backend=wayland gdk_display_type=GdkWaylandDisplay
 lionclip: placement backend=compositor-fallback status=not-available reason=wayland-does-not-allow-absolute-toplevel-placement
 ```
 
-This classifies exact pointer-relative placement on the native Wayland path as
-**not available**. The popup itself must still work without a crash.
+The popup should still open and close without crashing, but exact
+pointer-relative top-level placement is not provided by the current approach.
 
-### 3. Validate the XWayland experiment
+### XWayland experiment
 
-The following command opts only this LionClip process into GTK's X11 backend;
-it does not change the desktop session:
+From that same Wayland session, opt only LionClip into GTK's X11 backend:
 
 ```bash
 GDK_BACKEND=x11 cargo run 2>&1 | tee /tmp/lionclip-xwayland.log
 ```
 
-Expected successful-path diagnostics:
+Until this route is tested on a real Wayland session, the expected diagnostic
+classification is:
 
 ```text
 lionclip: diagnostics session=wayland gdk_backend=x11 gdk_display_type=GdkX11Display
 lionclip: placement backend=x11-pointer status=experimental result=placed x=... y=... monitor=...x...+...+...
 ```
 
-The popup status must say `X11 pointer experiment`. If the line instead says
-`compositor-fallback`, record its short `reason` value; the application should
-remain usable.
-
-Repeat the command after placing the pointer at each of these locations,
-closing with `Esc` between runs:
-
-- center of the primary monitor;
-- within about 20 px of every corner of the primary monitor;
-- center and corners of every additional monitor;
-- a monitor with non-100% scaling, if one is configured.
-
-Confirm that the popup is near the pointer when there is room and remains fully
-inside the current monitor at its edges. Then repeat at varied positions for at
-least ten launches.
-
-Classify the XWayland path as:
-
-- **working:** all launches are near the pointer and edge-clamped;
-- **unreliable:** the experimental log reports success, but one or more launches
-  are misplaced, overridden, or appear on another monitor;
-- **not available:** every launch uses the fallback or cannot open through the
-  X11 backend.
-
-### 4. Report the result
-
-Report these details on the PR without including clipboard content:
-
-- Zorin version and `gnome-shell --version`;
-- the three environment values from step 1;
-- monitor arrangement and scale factors;
-- both `lionclip: diagnostics` and `lionclip: placement` lines;
-- native Wayland result;
-- XWayland classification (`working`, `unreliable`, or `not available`);
-- which pointer/monitor positions failed, if any.
-
 ## Known limitations
 
-- Native GNOME Wayland intentionally uses compositor-managed placement because
-  the toplevel positioning protocol does not provide absolute coordinates to
-  normal clients.
-- The X11 path is an experiment. GNOME/XWayland may override a configure request,
-  and mixed/fractional scaling may expose coordinate differences.
-- RandR monitor rectangles represent monitor bounds, not reserved work areas;
-  a panel or dock can overlap an edge-clamped popup.
-- This code has not been classified on the primary Zorin machine until the
-  manual matrix above is completed.
+- Native GNOME Wayland relies on compositor-managed placement rather than exact
+  pointer-relative coordinates.
+- XWayland may override configure requests or expose coordinate differences,
+  especially with mixed or fractional scaling; it remains unvalidated.
+- RandR reports monitor bounds rather than reserved work areas. On the validated
+  target, GNOME/X11 applied its own additional work-area adjustment near the
+  panel.

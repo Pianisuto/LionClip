@@ -55,8 +55,12 @@ impl SessionDiagnostics {
         }
     }
 
-    pub fn backend(&self) -> DisplayBackend {
-        self.backend
+    fn x11_status(&self) -> X11PathStatus {
+        if self.session_type.eq_ignore_ascii_case("x11") {
+            X11PathStatus::Working
+        } else {
+            X11PathStatus::Experimental
+        }
     }
 
     pub fn log_line(&self) -> String {
@@ -75,6 +79,7 @@ pub enum PlacementOutcome {
         x: i32,
         y: i32,
         monitor: geometry::Rect,
+        status: X11PathStatus,
     },
     CompositorFallback {
         reason: String,
@@ -88,9 +93,14 @@ impl PlacementOutcome {
 
     pub fn display_text(&self) -> String {
         match self {
-            Self::X11Pointer { .. } => {
-                "Positioning: X11 pointer experiment (verify visually)".into()
-            }
+            Self::X11Pointer {
+                status: X11PathStatus::Working,
+                ..
+            } => "Positioning: X11 pointer placement (validated)".into(),
+            Self::X11Pointer {
+                status: X11PathStatus::Experimental,
+                ..
+            } => "Positioning: XWayland pointer experiment (verify visually)".into(),
             Self::CompositorFallback { .. } => {
                 "Positioning: compositor-managed fallback (exact placement unavailable)".into()
             }
@@ -99,9 +109,18 @@ impl PlacementOutcome {
 
     pub fn log_line(&self) -> String {
         match self {
-            Self::X11Pointer { x, y, monitor } => format!(
-                "lionclip: placement backend=x11-pointer status=experimental result=placed x={x} y={y} monitor={}x{}+{}+{}",
-                monitor.width, monitor.height, monitor.x, monitor.y
+            Self::X11Pointer {
+                x,
+                y,
+                monitor,
+                status,
+            } => format!(
+                "lionclip: placement backend=x11-pointer status={} result=placed x={x} y={y} monitor={}x{}+{}+{}",
+                status.label(),
+                monitor.width,
+                monitor.height,
+                monitor.x,
+                monitor.y
             ),
             Self::CompositorFallback { reason } => format!(
                 "lionclip: placement backend=compositor-fallback status=not-available reason={reason}"
@@ -112,26 +131,47 @@ impl PlacementOutcome {
 
 pub struct Positioner {
     backend: DisplayBackend,
+    x11_status: X11PathStatus,
 }
 
 impl Positioner {
-    pub fn new(backend: DisplayBackend) -> Self {
-        Self { backend }
+    pub fn new(diagnostics: &SessionDiagnostics) -> Self {
+        Self {
+            backend: diagnostics.backend,
+            x11_status: diagnostics.x11_status(),
+        }
     }
 
     pub fn place(&self, window: &adw::ApplicationWindow) -> PlacementOutcome {
         match self.backend {
-            DisplayBackend::X11 => x11::place_near_pointer(window).unwrap_or_else(|error| {
-                PlacementOutcome::CompositorFallback {
-                    reason: sanitize_reason(&error),
-                }
-            }),
+            DisplayBackend::X11 => {
+                x11::place_near_pointer(window, self.x11_status).unwrap_or_else(|error| {
+                    PlacementOutcome::CompositorFallback {
+                        reason: sanitize_reason(&error),
+                    }
+                })
+            }
             DisplayBackend::Wayland => PlacementOutcome::CompositorFallback {
                 reason: "wayland-does-not-allow-absolute-toplevel-placement".into(),
             },
             DisplayBackend::Unknown => PlacementOutcome::CompositorFallback {
                 reason: "unsupported-gdk-backend".into(),
             },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum X11PathStatus {
+    Working,
+    Experimental,
+}
+
+impl X11PathStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Experimental => "experimental",
         }
     }
 }
@@ -173,6 +213,54 @@ mod tests {
         assert_eq!(
             outcome.log_line(),
             "lionclip: placement backend=compositor-fallback status=not-available reason=x11-query-failed"
+        );
+    }
+
+    #[test]
+    fn native_x11_is_reported_as_working() {
+        let diagnostics = SessionDiagnostics {
+            session_type: "x11".into(),
+            backend: DisplayBackend::X11,
+            display_type: "GdkX11Display".into(),
+        };
+
+        assert_eq!(diagnostics.x11_status(), X11PathStatus::Working);
+    }
+
+    #[test]
+    fn xwayland_is_reported_as_experimental() {
+        let diagnostics = SessionDiagnostics {
+            session_type: "wayland".into(),
+            backend: DisplayBackend::X11,
+            display_type: "GdkX11Display".into(),
+        };
+
+        assert_eq!(diagnostics.x11_status(), X11PathStatus::Experimental);
+    }
+
+    #[test]
+    fn x11_placement_log_reflects_session_validation() {
+        let outcome = |status| PlacementOutcome::X11Pointer {
+            x: 100,
+            y: 200,
+            monitor: geometry::Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            status,
+        };
+
+        assert!(
+            outcome(X11PathStatus::Working)
+                .log_line()
+                .contains("status=working")
+        );
+        assert!(
+            outcome(X11PathStatus::Experimental)
+                .log_line()
+                .contains("status=experimental")
         );
     }
 }

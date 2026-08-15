@@ -27,7 +27,7 @@ fn activate(application: &adw::Application) {
     let diagnostics = SessionDiagnostics::collect();
     println!("{}", diagnostics.log_line());
 
-    let positioner = Positioner::new(diagnostics.backend());
+    let positioner = Positioner::new(&diagnostics);
 
     popup.window.add_tick_callback({
         let placement_label = popup.placement_label.clone();

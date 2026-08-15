@@ -9,7 +9,7 @@ use x11rb::{
 };
 
 use super::{
-    PlacementOutcome,
+    PlacementOutcome, X11PathStatus,
     geometry::{Point, Rect, Size, clamp_popup_origin, monitor_at_pointer},
 };
 
@@ -26,6 +26,7 @@ pub enum PositionError {
 
 pub fn place_near_pointer(
     window: &adw::ApplicationWindow,
+    status: X11PathStatus,
 ) -> Result<PlacementOutcome, PositionError> {
     let surface = window
         .surface()
@@ -90,6 +91,7 @@ pub fn place_near_pointer(
         x: origin.x,
         y: origin.y,
         monitor,
+        status,
     })
 }
 
