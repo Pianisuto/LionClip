@@ -41,6 +41,7 @@ pub fn run() -> glib::ExitCode {
 }
 
 struct AppState {
+    history: Rc<RefCell<TextHistory>>,
     popup: Rc<HistoryPopup>,
     positioner: Positioner,
     _clipboard_service: ClipboardService,
@@ -76,12 +77,15 @@ impl AppState {
             let history = history.clone();
             let popup = popup.clone();
 
-            move || popup.render(history.borrow().items())
+            move || {
+                if popup.window.is_visible() {
+                    popup.render(history.borrow().items());
+                }
+            }
         }));
 
-        popup.render(history.borrow().items());
-
         Some(Self {
+            history,
             popup,
             positioner: Positioner::new(&diagnostics),
             _clipboard_service: clipboard_service,
@@ -90,6 +94,8 @@ impl AppState {
     }
 
     fn show_popup(&self) {
+        self.popup.render(self.history.borrow().items());
+
         if !self.popup.window.is_visible() {
             let positioner = self.positioner.clone();
             self.popup.window.add_tick_callback(move |window, _| {

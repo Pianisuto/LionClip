@@ -3,10 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use gtk::{
-    gdk, glib,
-    prelude::{ObjectExt, StaticType},
-};
+use gtk::{gdk, glib, prelude::ObjectExt};
 
 use crate::history::{HistoryUpdate, TextHistory};
 
@@ -54,11 +51,6 @@ impl ClipboardService {
                 let sequence = change_sequence.get().wrapping_add(1);
                 change_sequence.set(sequence);
 
-                if !clipboard.formats().contains_type(String::static_type()) {
-                    suppression.borrow_mut().cancel();
-                    return;
-                }
-
                 let clipboard = clipboard.clone();
                 let history = history.clone();
                 let history_changed = history_changed.clone();
@@ -73,13 +65,8 @@ impl ClipboardService {
 
                     let text = match read_result {
                         Ok(Some(text)) => text.to_string(),
-                        Ok(None) => {
+                        Ok(None) | Err(_) => {
                             suppression.borrow_mut().cancel();
-                            return;
-                        }
-                        Err(_) => {
-                            suppression.borrow_mut().cancel();
-                            eprintln!("lionclip: clipboard text read failed");
                             return;
                         }
                     };
