@@ -8,7 +8,7 @@ use crate::{
     history::TextHistory,
     popup::{self, HistoryPopup},
     positioning::{Positioner, SessionDiagnostics},
-    storage,
+    storage, unix_signals,
 };
 
 const APPLICATION_ID: &str = "io.github.Pianisuto.LionClip";
@@ -45,7 +45,10 @@ pub fn run() -> glib::ExitCode {
         }
     });
 
-    application.run()
+    let quit_signal_sources = unix_signals::install_quit_handlers(application.upcast_ref());
+    let exit_code = application.run();
+    quit_signal_sources.remove();
+    exit_code
 }
 
 struct AppState {

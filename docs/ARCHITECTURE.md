@@ -174,6 +174,17 @@ foreign-key enforcement for migration safety; WAL is intentionally not enabled
 because LionClip has one serialized database path and does not need concurrent
 readers.
 
+The migration runner walks a small ordered migration table. Each pending
+version runs in its own transaction and advances `user_version` only after its
+schema changes succeed. Databases newer than LionClip supports are rejected
+without modification.
+
+On Unix, SIGTERM and SIGINT are observed through GLib Unix signal sources on
+the main context. Their callbacks request `GApplication::quit`; the normal
+application shutdown signal then drops application state and drains and joins
+the database worker. Popup close and Escape continue to hide the resident
+process without shutting it down.
+
 If the data path, database, or migration cannot initialize, LionClip reports a
 payload-free diagnostic and runs with bounded in-memory history for that
 session. A later write failure is also reported without clipboard contents;

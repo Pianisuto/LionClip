@@ -13,6 +13,28 @@ use super::{HistoryItemId, TextHistoryItem};
 
 const SCHEMA_VERSION: i64 = 1;
 
+struct Migration {
+    version: i64,
+    sql: &'static str,
+    error_stage: &'static str,
+}
+
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    sql: "CREATE TABLE history_items (
+            id INTEGER PRIMARY KEY CHECK (id >= 0),
+            kind TEXT NOT NULL CHECK (kind = 'text'),
+            text_content TEXT NOT NULL,
+            created_sequence INTEGER NOT NULL CHECK (created_sequence >= 0),
+            last_used_sequence INTEGER NOT NULL UNIQUE CHECK (last_used_sequence >= 0),
+            pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+            UNIQUE (kind, text_content)
+        );
+        CREATE INDEX history_items_order
+            ON history_items(last_used_sequence DESC);",
+    error_stage: "migration-schema-v1",
+}];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PersistenceError {
     stage: &'static str,
@@ -207,7 +229,7 @@ impl Repository {
     }
 
     fn migrate(&mut self) -> Result<(), PersistenceError> {
-        let version: i64 = self
+        let mut version: i64 = self
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| PersistenceError::at("migration-version-read"))?;
@@ -216,32 +238,28 @@ impl Repository {
             return Err(PersistenceError::at("migration-version-newer"));
         }
 
-        if version == 0 {
+        for migration in MIGRATIONS {
+            if migration.version <= version {
+                continue;
+            }
+            if migration.version != version + 1 {
+                return Err(PersistenceError::at("migration-sequence"));
+            }
+
             let transaction = self
                 .connection
                 .transaction()
                 .map_err(|_| PersistenceError::at("migration-transaction"))?;
             transaction
-                .execute_batch(
-                    "CREATE TABLE history_items (
-                        id INTEGER PRIMARY KEY CHECK (id >= 0),
-                        kind TEXT NOT NULL CHECK (kind = 'text'),
-                        text_content TEXT NOT NULL,
-                        created_sequence INTEGER NOT NULL CHECK (created_sequence >= 0),
-                        last_used_sequence INTEGER NOT NULL UNIQUE CHECK (last_used_sequence >= 0),
-                        pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
-                        UNIQUE (kind, text_content)
-                    );
-                    CREATE INDEX history_items_order
-                        ON history_items(last_used_sequence DESC);",
-                )
-                .map_err(|_| PersistenceError::at("migration-schema-v1"))?;
+                .execute_batch(migration.sql)
+                .map_err(|_| PersistenceError::at(migration.error_stage))?;
             transaction
-                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .pragma_update(None, "user_version", migration.version)
                 .map_err(|_| PersistenceError::at("migration-version-write"))?;
             transaction
                 .commit()
                 .map_err(|_| PersistenceError::at("migration-commit"))?;
+            version = migration.version;
         }
 
         Ok(())
@@ -394,6 +412,25 @@ mod tests {
         let reopened = Repository::open(database.path()).unwrap();
         assert_eq!(reopened.schema_version(), Ok(SCHEMA_VERSION));
         assert_eq!(reopened.item_count(), Ok(0));
+    }
+
+    #[test]
+    fn newer_than_supported_schema_is_rejected() {
+        let database = TestDatabase::new("newer-schema");
+        drop(Repository::open(database.path()).unwrap());
+
+        let connection = Connection::open(database.path()).unwrap();
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            Repository::open(database.path()),
+            Err(PersistenceError {
+                stage: "migration-version-newer"
+            })
+        ));
     }
 
     #[test]
