@@ -121,6 +121,8 @@ Copy items, restart LionClip/session, reopen the popup, and the history remains.
 
 ## Phase 3 — Polished text UX
 
+**Status: implemented, pending manual validation on the target machine.**
+
 ### Goal
 
 Make text history faster and nicer than using a traditional clipboard manager window.
@@ -149,6 +151,15 @@ Make text history faster and nicer than using a traditional clipboard manager wi
 - search stays responsive with the configured history limit;
 - pinned items behave consistently with retention;
 - visual hierarchy remains restrained and native.
+
+### Result
+
+Search, pin/unpin, delete and clear-unpinned are implemented as `TextHistory`
+operations persisted through the existing worker; schema v1 remained sufficient.
+The popup keeps the validated X11 placement and only rebuilds rows while it is
+visible. Ordering is pinned-first, then recency, in both groups. Timestamps were
+deliberately not added: schema v1 stores logical sequences, and inventing
+human-readable times from them would be fake metadata.
 
 ---
 

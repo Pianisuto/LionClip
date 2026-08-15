@@ -146,6 +146,43 @@ Repeated copies of the same logical content should not produce a noisy stack of 
 
 Hashing is an implementation detail and must be defined consistently for each content kind.
 
+### Ordering
+
+`TextHistory` keeps one deterministic order:
+
+1. pinned items first, then unpinned items;
+2. inside each group, `last_used_sequence` descending.
+
+Pinning moves an item into the pinned group without changing its own recency;
+re-copying an item refreshes its recency inside its group. Restoring an item to
+the clipboard deliberately does not change ordering, because the restore is
+suppressed as a self-write and never re-enters history.
+
+### History operations
+
+The UI never mutates a `TextHistoryItem` and never sees a SQLite connection. It
+calls explicit domain operations on `TextHistory`:
+
+```text
+record(text)        -> Inserted | MovedToFront | Unchanged
+pin(id) / unpin(id) -> Applied | Rejected
+delete(id)          -> Applied | Rejected
+clear_unpinned()    -> Applied | Rejected
+search(&query)      -> Vec<&TextHistoryItem>
+```
+
+Operations on unknown identifiers, or that would not change anything, return
+`Rejected` and submit no persistence mutation. Every applied operation updates
+the in-memory source of truth first and then queues the matching mutation on the
+database worker.
+
+### Search
+
+`HistoryQuery` is a small filter layer over the already-loaded items:
+case-insensitive substring matching, trimmed query text, original content
+preserved, input order preserved. The popup re-runs it on every keystroke
+against memory; search never queries SQLite and query text is never logged.
+
 ## Storage
 
 Text history is persisted in SQLite at
@@ -164,11 +201,16 @@ pinned                retention exemption (UI arrives in Phase 3)
 ```
 
 The logical sequences avoid wall-clock ties and make restart ordering
-deterministic. `TextHistory` owns insertion, exact-content deduplication,
-move-to-front behavior, identity allocation, and the 500-unpinned-item retention
-policy. A single dedicated worker applies the resulting mutations to SQLite in
-channel order, keeping synchronous database work out of clipboard and GTK
-rendering callbacks. Normal worker shutdown drains accepted commands before the
+deterministic. Schema v1 already expresses pin, delete and clear, so Phase 3
+introduced no schema v2; the UI intentionally shows no timestamps rather than
+migrating the schema for decoration.
+
+`TextHistory` owns insertion, exact-content deduplication, move-to-front
+behavior, identity allocation, pin state, deletion, and the 500-unpinned-item
+retention policy. A single dedicated worker applies the resulting mutations
+(`Upsert`, `Delete`, `ClearUnpinned`) to SQLite in channel order, keeping
+synchronous database work out of clipboard and GTK rendering callbacks. Clearing
+is one statement in one transaction rather than one command per removed item. Normal worker shutdown drains accepted commands before the
 database connection closes. SQLite uses a five-second busy timeout and enables
 foreign-key enforcement for migration safety; WAL is intentionally not enabled
 because LionClip has one serialized database path and does not need concurrent
@@ -227,6 +269,37 @@ Direction:
 
 For text rows, display a compact preview. Do not execute or interpret copied content.
 
+### Current structure
+
+```text
+AdwApplicationWindow (430 px, undecorated, non-resizable)
+└── GtkBox
+    ├── GtkSearchEntry + GtkMenuButton (overflow: clear unpinned history)
+    ├── GtkSeparator
+    ├── GtkScrolledWindow → GtkListBox   (rows, max content height 360 px)
+    └── empty/no-results message         (shown instead of the list)
+```
+
+Height follows content up to the list cap, so a short history stays small.
+Rows are rebuilt from the filtered snapshot; row identity for every action is
+`HistoryItemId`, never the GTK row index. Row actions (pin toggle, delete) are
+real buttons that stay reachable by keyboard and are revealed on hover,
+selection or focus by a four-line stylesheet with no hardcoded colors.
+
+### Interaction
+
+- typing anywhere filters, including while a result row holds focus;
+- `Down`/`Up` move the selection, `Up` on the first result returns to search;
+- `Enter` restores the selection and hides the popup;
+- `Escape` clears a non-empty search, otherwise hides the popup;
+- `Delete` removes the selected item when focus is in the result list, so it
+  still edits text while the search field has focus;
+- `Ctrl+F` focuses search, `Ctrl+P` pins/unpins the selection;
+- clicking a row restores it; clicking a row action does not restore it.
+
+The popup hides when the toplevel loses focus, except while its own overflow
+menu or confirmation dialog holds the focus.
+
 ## Positioning
 
 This is the primary architecture risk.
@@ -270,7 +343,8 @@ without an explicit future roadmap decision.
 
 ## Search
 
-Start simple. In-memory filtering or a straightforward SQLite query is enough for hundreds of text entries.
+In-memory filtering is enough for hundreds of text entries, and that is what
+Phase 3 implements (see the `HistoryQuery` note above).
 
 FTS should only be introduced after measuring a real need.
 

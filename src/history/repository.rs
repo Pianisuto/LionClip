@@ -59,6 +59,9 @@ pub(super) enum PersistenceMutation {
     Delete {
         removed_ids: Vec<HistoryItemId>,
     },
+    /// Bulk removal applied as a single statement instead of one command per
+    /// item, so clearing a full history stays one small transaction.
+    ClearUnpinned,
 }
 
 enum WorkerCommand {
@@ -320,6 +323,12 @@ impl Repository {
                 removed_ids
             }
             PersistenceMutation::Delete { removed_ids } => removed_ids,
+            PersistenceMutation::ClearUnpinned => {
+                transaction
+                    .execute("DELETE FROM history_items WHERE pinned = 0", [])
+                    .map_err(|_| PersistenceError::at("history-clear-unpinned"))?;
+                Vec::new()
+            }
         };
 
         for id in removed_ids {
@@ -431,6 +440,43 @@ mod tests {
                 stage: "migration-version-newer"
             })
         ));
+    }
+
+    #[test]
+    fn clear_unpinned_removes_only_unpinned_rows_in_one_transaction() {
+        let database = TestDatabase::new("clear-unpinned");
+        let mut repository = Repository::open(database.path()).unwrap();
+        for index in 0..4 {
+            repository
+                .apply(PersistenceMutation::Upsert {
+                    item: TextHistoryItem::new(
+                        HistoryItemId::new(index),
+                        format!("item {index}"),
+                        index,
+                        index,
+                        index % 2 == 0,
+                    ),
+                    removed_ids: Vec::new(),
+                })
+                .unwrap();
+        }
+
+        repository
+            .apply(PersistenceMutation::ClearUnpinned)
+            .unwrap();
+
+        assert_eq!(repository.item_count(), Ok(2));
+        assert!(
+            repository
+                .load()
+                .unwrap()
+                .iter()
+                .all(TextHistoryItem::is_pinned)
+        );
+        drop(repository);
+
+        let reopened = Repository::open(database.path()).unwrap();
+        assert_eq!(reopened.item_count(), Ok(2));
     }
 
     #[test]

@@ -80,7 +80,7 @@ impl AppState {
         );
         let writer: ClipboardWriter = clipboard_service.writer();
 
-        let popup = Rc::new(popup::build(application, {
+        let popup = Rc::new(popup::build(application, history.clone(), {
             let history = history.clone();
 
             move |id| {
@@ -91,12 +91,11 @@ impl AppState {
         }));
 
         *history_changed.borrow_mut() = Some(Box::new({
-            let history = history.clone();
             let popup = popup.clone();
 
             move || {
                 if popup.window.is_visible() {
-                    popup.render(history.borrow().items());
+                    popup.refresh();
                 }
             }
         }));
@@ -111,8 +110,6 @@ impl AppState {
     }
 
     fn show_popup(&self) {
-        self.popup.render(self.history.borrow().items());
-
         if !self.popup.window.is_visible() {
             let positioner = self.positioner.clone();
             self.popup.window.add_tick_callback(move |window, _| {
