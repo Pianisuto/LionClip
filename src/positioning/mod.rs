@@ -87,26 +87,6 @@ pub enum PlacementOutcome {
 }
 
 impl PlacementOutcome {
-    pub fn used_pointer_placement(&self) -> bool {
-        matches!(self, Self::X11Pointer { .. })
-    }
-
-    pub fn display_text(&self) -> String {
-        match self {
-            Self::X11Pointer {
-                status: X11PathStatus::Working,
-                ..
-            } => "Positioning: X11 pointer placement (validated)".into(),
-            Self::X11Pointer {
-                status: X11PathStatus::Experimental,
-                ..
-            } => "Positioning: XWayland pointer experiment (verify visually)".into(),
-            Self::CompositorFallback { .. } => {
-                "Positioning: compositor-managed fallback (exact placement unavailable)".into()
-            }
-        }
-    }
-
     pub fn log_line(&self) -> String {
         match self {
             Self::X11Pointer {
@@ -129,6 +109,7 @@ impl PlacementOutcome {
     }
 }
 
+#[derive(Clone)]
 pub struct Positioner {
     backend: DisplayBackend,
     x11_status: X11PathStatus,
