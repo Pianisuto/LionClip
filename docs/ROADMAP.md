@@ -54,6 +54,8 @@ fallback and experimental backend remain in place.
 
 ## Phase 1 — Real text clipboard history in memory
 
+**Status: complete.**
+
 ### Goal
 
 Make LionClip useful for text without persistence.
@@ -85,6 +87,8 @@ Copy text in multiple apps, open LionClip, see recent items, choose one, then pa
 ---
 
 ## Phase 2 — Persistence and history rules
+
+**Status: complete.**
 
 ### Goal
 

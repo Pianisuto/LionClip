@@ -10,13 +10,14 @@ The project intentionally avoids becoming a large automation or scripting platfo
 
 ## Status
 
-**Early development / Phase 0 complete.**
+**Early development / Phase 2 complete.**
 
 Phase 0 validated pointer-relative popup placement on the real target machine:
 Zorin OS with GNOME/X11. Native GNOME Wayland uses a safe compositor-managed
 fallback because exact top-level placement is unavailable through the current
 approach. XWayland inside a Wayland session remains experimental and has not
-yet been validated.
+yet been validated. Text clipboard history is now event-driven, exact-content
+deduplicated, bounded, and persisted locally in SQLite across restarts.
 
 Do not expect a usable release yet.
 

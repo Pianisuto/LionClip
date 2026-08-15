@@ -8,6 +8,7 @@ use crate::{
     history::TextHistory,
     popup::{self, HistoryPopup},
     positioning::{Positioner, SessionDiagnostics},
+    storage, unix_signals,
 };
 
 const APPLICATION_ID: &str = "io.github.Pianisuto.LionClip";
@@ -36,8 +37,18 @@ pub fn run() -> glib::ExitCode {
             }
         }
     });
+    application.connect_shutdown({
+        let state = state.clone();
 
-    application.run()
+        move |_| {
+            state.borrow_mut().take();
+        }
+    });
+
+    let quit_signal_sources = unix_signals::install_quit_handlers(application.upcast_ref());
+    let exit_code = application.run();
+    quit_signal_sources.remove();
+    exit_code
 }
 
 struct AppState {
@@ -48,13 +59,19 @@ struct AppState {
     _hold: gio::ApplicationHoldGuard,
 }
 
+impl Drop for AppState {
+    fn drop(&mut self) {
+        self.history.borrow_mut().shutdown_persistence();
+    }
+}
+
 impl AppState {
     fn new(application: &adw::Application) -> Option<Self> {
         let display = gdk::Display::default()?;
         let diagnostics = SessionDiagnostics::collect();
         println!("{}", diagnostics.log_line());
 
-        let history = Rc::new(RefCell::new(TextHistory::default()));
+        let history = Rc::new(RefCell::new(load_history()));
         let history_changed: HistoryChangedCallback = Rc::new(RefCell::new(None));
         let clipboard_service = ClipboardService::start(
             display.clipboard(),
@@ -106,5 +123,26 @@ impl AppState {
         }
 
         self.popup.present();
+    }
+}
+
+fn load_history() -> TextHistory {
+    let path = match storage::database_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("lionclip: persistence disabled stage=data-path error={error}");
+            return TextHistory::default();
+        }
+    };
+
+    match TextHistory::persistent(path) {
+        Ok(history) => history,
+        Err(error) => {
+            eprintln!(
+                "lionclip: persistence disabled stage={}",
+                error.diagnostic()
+            );
+            TextHistory::default()
+        }
     }
 }

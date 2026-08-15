@@ -148,7 +148,49 @@ Hashing is an implementation detail and must be defined consistently for each co
 
 ## Storage
 
-When persistence is introduced:
+Text history is persisted in SQLite at
+`$XDG_DATA_HOME/lionclip/lionclip.db`, with the standard
+`$HOME/.local/share` fallback when `XDG_DATA_HOME` is unset. Schema changes use
+ordered migrations recorded in SQLite's `user_version`; schema version 1 has a
+single `history_items` table:
+
+```text
+id                    stable INTEGER PRIMARY KEY
+kind                  "text" in schema v1
+text_content          exact, lossless clipboard text
+created_sequence      monotonic logical creation order
+last_used_sequence    monotonic logical recency order
+pinned                retention exemption (UI arrives in Phase 3)
+```
+
+The logical sequences avoid wall-clock ties and make restart ordering
+deterministic. `TextHistory` owns insertion, exact-content deduplication,
+move-to-front behavior, identity allocation, and the 500-unpinned-item retention
+policy. A single dedicated worker applies the resulting mutations to SQLite in
+channel order, keeping synchronous database work out of clipboard and GTK
+rendering callbacks. Normal worker shutdown drains accepted commands before the
+database connection closes. SQLite uses a five-second busy timeout and enables
+foreign-key enforcement for migration safety; WAL is intentionally not enabled
+because LionClip has one serialized database path and does not need concurrent
+readers.
+
+The migration runner walks a small ordered migration table. Each pending
+version runs in its own transaction and advances `user_version` only after its
+schema changes succeed. Databases newer than LionClip supports are rejected
+without modification.
+
+On Unix, SIGTERM and SIGINT are observed through GLib Unix signal sources on
+the main context. Their callbacks request `GApplication::quit`; the normal
+application shutdown signal then drops application state and drains and joins
+the database worker. Popup close and Escape continue to hide the resident
+process without shutting it down.
+
+If the data path, database, or migration cannot initialize, LionClip reports a
+payload-free diagnostic and runs with bounded in-memory history for that
+session. A later write failure is also reported without clipboard contents;
+the in-memory session remains usable.
+
+For later content phases:
 
 - use SQLite;
 - use standard XDG data locations;
