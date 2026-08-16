@@ -1,6 +1,5 @@
 use crate::{
-    image_cleanup::ImageCleanupCoordinator,
-    image_store::MAX_IMAGE_STORAGE_BYTES,
+    image_cleanup::ImageCleanupCoordinator, image_store::MAX_IMAGE_STORAGE_BYTES,
     storage::StoragePaths,
 };
 
