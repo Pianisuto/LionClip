@@ -7,7 +7,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   checks:
@@ -17,8 +17,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.head.ref || github.ref }}
 
       - name: Install native dependencies
         run: |
@@ -34,70 +32,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-
-      - name: Finalize Phase 4 restore semantics
-        if: github.event_name == 'pull_request' && github.head_ref == 'gpt/issue-5-phase-4'
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          image_store = Path('src/image_store.rs')
-          text = image_store.read_text().replace(
-              '.save_to_bufferv("jpeg", &["quality"], &["90"])',
-              '.save_to_bufferv("jpeg", &[("quality", "90")])',
-          )
-          image_store.write_text(text)
-
-          service = Path('src/clipboard/service.rs')
-          text = service.read_text()
-          pattern = re.compile(
-              r'''    pub fn restore_image\(&self, image: &ImageData\) \{.*?\n    \}\n\}\n\npub struct ClipboardService''',
-              re.S,
-          )
-          replacement = '''    pub fn restore_image(&self, image: &ImageData) {
-              let Some(path) = image_store::blob_path(&self.paths, image) else {
-                  eprintln!("lionclip: image restore failed stage=invalid-blob-key");
-                  return;
-              };
-
-              // Restoration must complete before the popup closes: otherwise a fast
-              // Ctrl+V can still see the previous clipboard while an async file read is
-              // pending. This reads only the bounded compressed blob (max 25 MiB); it
-              // never decodes full-resolution pixels on the GTK thread.
-              let bytes = match fs::read(path) {
-                  Ok(bytes) => bytes,
-                  Err(_) => {
-                      eprintln!("lionclip: image restore failed stage=blob-read");
-                      return;
-                  }
-              };
-              let bytes = glib::Bytes::from_owned(bytes);
-              let provider = gdk::ContentProvider::for_bytes(image.mime_type().as_str(), &bytes);
-              self.suppression
-                  .borrow_mut()
-                  .arm_image(image.content_hash());
-              if self.clipboard.set_content(Some(&provider)).is_err() {
-                  self.suppression.borrow_mut().cancel();
-                  eprintln!("lionclip: image restore failed stage=clipboard-set");
-              }
-          }
-          }
-
-          pub struct ClipboardService'''
-          text, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit(f'restore_image replacement count={count}')
-          service.write_text(text)
-          PY
-          cargo fmt
-          if ! git diff --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add src/image_store.rs src/clipboard/service.rs
-            git commit -m 'fix: complete image restore before popup closes'
-            git push origin HEAD:${GITHUB_HEAD_REF}
-          fi
 
       - name: Check formatting
         run: cargo fmt --check
