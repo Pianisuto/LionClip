@@ -10,14 +10,20 @@ The project intentionally avoids becoming a large automation or scripting platfo
 
 ## Status
 
-**Early development / Phase 2 complete.**
+**Early development / Phase 3 implemented.**
 
 Phase 0 validated pointer-relative popup placement on the real target machine:
 Zorin OS with GNOME/X11. Native GNOME Wayland uses a safe compositor-managed
 fallback because exact top-level placement is unavailable through the current
 approach. XWayland inside a Wayland session remains experimental and has not
-yet been validated. Text clipboard history is now event-driven, exact-content
+yet been validated. Text clipboard history is event-driven, exact-content
 deduplicated, bounded, and persisted locally in SQLite across restarts.
+
+The popup now behaves like a small system surface: type to search instantly,
+arrows to navigate, `Enter` to restore, `Escape` to clear the search and then
+dismiss, `Delete` to remove an item, `Ctrl+P` to pin, and a restrained overflow
+menu to clear unpinned history. Pinned items are kept first and are exempt from
+the retention limit.
 
 Do not expect a usable release yet.
 

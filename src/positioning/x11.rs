@@ -2,6 +2,7 @@ use gdk4_x11::X11Surface;
 use gtk::prelude::*;
 use x11rb::{
     connection::Connection,
+    properties::{WmSizeHints, WmSizeHintsSpecification},
     protocol::{
         randr::ConnectionExt as _,
         xproto::{ConfigureWindowAux, ConnectionExt as _},
@@ -9,7 +10,7 @@ use x11rb::{
 };
 
 use super::{
-    PlacementOutcome, X11PathStatus,
+    PlacementOutcome, PointerAnchor, X11PathStatus,
     geometry::{Point, Rect, Size, clamp_popup_origin, monitor_at_pointer},
 };
 
@@ -27,6 +28,7 @@ pub enum PositionError {
 pub fn place_near_pointer(
     window: &adw::ApplicationWindow,
     status: X11PathStatus,
+    anchor: Option<PointerAnchor>,
 ) -> Result<PlacementOutcome, PositionError> {
     let surface = window
         .surface()
@@ -45,14 +47,19 @@ pub fn place_near_pointer(
         .get(screen_number)
         .ok_or(PositionError::Query)?;
 
-    let pointer_reply = connection
-        .query_pointer(screen.root)
-        .map_err(|_| PositionError::Query)?
-        .reply()
-        .map_err(|_| PositionError::Query)?;
-    let pointer = Point {
-        x: i32::from(pointer_reply.root_x),
-        y: i32::from(pointer_reply.root_y),
+    let pointer = match anchor {
+        Some(PointerAnchor(pointer)) => pointer,
+        None => {
+            let pointer_reply = connection
+                .query_pointer(screen.root)
+                .map_err(|_| PositionError::Query)?
+                .reply()
+                .map_err(|_| PositionError::Query)?;
+            Point {
+                x: i32::from(pointer_reply.root_x),
+                y: i32::from(pointer_reply.root_y),
+            }
+        }
     };
 
     let window_geometry = connection
@@ -80,6 +87,7 @@ pub fn place_near_pointer(
     };
     let origin = clamp_popup_origin(desired, popup_size, monitor, MONITOR_MARGIN);
 
+    announce_position(&connection, xid, origin)?;
     connection
         .configure_window(xid, &ConfigureWindowAux::new().x(origin.x).y(origin.y))
         .map_err(|_| PositionError::Placement)?
@@ -92,7 +100,81 @@ pub fn place_near_pointer(
         y: origin.y,
         monitor,
         status,
+        anchor: PointerAnchor(pointer),
     })
+}
+
+/// Whether the popup's surface still owns the X keyboard focus.
+///
+/// A keyboard grab — a desktop shortcut being pressed, a menu opening —
+/// deactivates the toplevel without taking the input focus away from it, while
+/// another window taking over does move the focus. Telling those apart is what
+/// keeps the popup open while its own shortcut is pressed.
+pub fn holds_keyboard_focus(window: &adw::ApplicationWindow) -> Result<bool, PositionError> {
+    let surface = window
+        .surface()
+        .and_then(|surface| surface.downcast::<X11Surface>().ok())
+        .ok_or(PositionError::SurfaceUnavailable)?;
+    let xid: u32 = surface
+        .xid()
+        .try_into()
+        .map_err(|_| PositionError::SurfaceUnavailable)?;
+
+    let (connection, _) = x11rb::connect(None).map_err(|_| PositionError::Connection)?;
+    let focus = connection
+        .get_input_focus()
+        .map_err(|_| PositionError::Query)?
+        .reply()
+        .map_err(|_| PositionError::Query)?
+        .focus;
+    if focus == xid {
+        return Ok(true);
+    }
+
+    // The focus usually sits on a descendant of the toplevel, and a window
+    // manager may also reparent the toplevel into a frame.
+    let mut candidate = focus;
+    for _ in 0..8 {
+        let tree = connection
+            .query_tree(candidate)
+            .map_err(|_| PositionError::Query)?
+            .reply()
+            .map_err(|_| PositionError::Query)?;
+        if tree.parent == 0 || tree.parent == tree.root {
+            return Ok(false);
+        }
+        if tree.parent == xid {
+            return Ok(true);
+        }
+        candidate = tree.parent;
+    }
+    Ok(false)
+}
+
+/// Records the placement as a user-specified position in `WM_NORMAL_HINTS`.
+///
+/// A window manager places a window it has not managed yet by its own policy
+/// and ignores the coordinates the client set before mapping. Announcing the
+/// position as user-specified makes it honour the placement instead, so the
+/// popup is mapped where it belongs rather than moved there afterwards. The
+/// existing hints are read back first so GTK's own size constraints survive.
+fn announce_position<C: Connection>(
+    connection: &C,
+    window: u32,
+    origin: Point,
+) -> Result<(), PositionError> {
+    let mut hints = WmSizeHints::get_normal_hints(connection, window)
+        .map_err(|_| PositionError::Placement)?
+        .reply()
+        .map_err(|_| PositionError::Placement)?
+        .unwrap_or_default();
+    hints.position = Some((WmSizeHintsSpecification::UserSpecified, origin.x, origin.y));
+    hints
+        .set_normal_hints(connection, window)
+        .map_err(|_| PositionError::Placement)?
+        .check()
+        .map_err(|_| PositionError::Placement)?;
+    Ok(())
 }
 
 fn query_monitors<C: Connection>(connection: &C, root: u32) -> Option<Vec<Rect>> {

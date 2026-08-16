@@ -45,6 +45,10 @@ impl TextHistoryItem {
         &self.text
     }
 
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
     pub(super) fn created_sequence(&self) -> i64 {
         self.created_sequence
     }
@@ -57,7 +61,7 @@ impl TextHistoryItem {
         self.last_used_sequence = sequence;
     }
 
-    pub(super) fn is_pinned(&self) -> bool {
-        self.pinned
+    pub(super) fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
     }
 }

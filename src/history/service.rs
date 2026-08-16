@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::{
-    HistoryItemId, TextHistoryItem,
+    HistoryItemId, HistoryQuery, TextHistoryItem,
     repository::{PersistenceError, PersistenceMutation, PersistenceWorker},
 };
 
@@ -20,6 +20,27 @@ impl HistoryUpdate {
     }
 }
 
+/// Result of an explicit history operation requested by the user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistoryChange {
+    /// The history changed and the persisted mutation was submitted.
+    Applied,
+    /// Nothing changed: the identifier is unknown or already in that state.
+    Rejected,
+}
+
+impl HistoryChange {
+    pub fn changed(self) -> bool {
+        matches!(self, Self::Applied)
+    }
+}
+
+/// In-memory source of truth for text clipboard history.
+///
+/// Ordering is deterministic: pinned items come first, then unpinned items,
+/// and both groups are ordered by last-used sequence descending. Pinning
+/// therefore moves an item into the pinned group without changing its own
+/// recency, and re-copying an item refreshes its recency inside its group.
 pub struct TextHistory {
     items: Vec<TextHistoryItem>,
     next_id: Option<i64>,
@@ -52,12 +73,7 @@ impl TextHistory {
         unpinned_limit: usize,
         persistence: Option<PersistenceWorker>,
     ) -> Self {
-        items.sort_by_key(|item| {
-            (
-                std::cmp::Reverse(item.last_used_sequence()),
-                std::cmp::Reverse(item.id().value()),
-            )
-        });
+        sort_items(&mut items);
         let next_id = next_value(items.iter().map(|item| item.id().value()));
         let next_sequence = next_value(items.iter().map(TextHistoryItem::last_used_sequence));
 
@@ -79,7 +95,7 @@ impl TextHistory {
 
     pub fn record(&mut self, text: String) -> HistoryUpdate {
         if let Some(index) = self.items.iter().position(|item| item.text() == text) {
-            if index == 0 {
+            if self.items[index].last_used_sequence() == self.newest_sequence() {
                 return HistoryUpdate::Unchanged;
             }
 
@@ -87,9 +103,9 @@ impl TextHistory {
                 eprintln!("lionclip: history update rejected reason=sequence-exhausted");
                 return HistoryUpdate::Unchanged;
             };
-            let mut item = self.items.remove(index);
-            item.set_last_used_sequence(sequence);
-            self.items.insert(0, item.clone());
+            self.items[index].set_last_used_sequence(sequence);
+            let item = self.items[index].clone();
+            sort_items(&mut self.items);
             self.persist(PersistenceMutation::Upsert {
                 item,
                 removed_ids: Vec::new(),
@@ -105,7 +121,8 @@ impl TextHistory {
             return HistoryUpdate::Unchanged;
         };
         let item = TextHistoryItem::new(HistoryItemId::new(id), text, sequence, sequence, false);
-        self.items.insert(0, item.clone());
+        self.items.push(item.clone());
+        sort_items(&mut self.items);
         let removed_ids = self.enforce_retention();
         self.persist(PersistenceMutation::Upsert { item, removed_ids });
         HistoryUpdate::Inserted
@@ -119,8 +136,78 @@ impl TextHistory {
         self.items.iter().find(|item| item.id() == id)
     }
 
+    /// Filters the loaded history without touching the database.
+    pub fn search(&self, query: &HistoryQuery) -> Vec<&TextHistoryItem> {
+        query.filter(&self.items)
+    }
+
+    /// Exempts an item from the unpinned retention limit and moves it into the
+    /// pinned group. Its own recency is left untouched.
+    pub fn pin(&mut self, id: HistoryItemId) -> HistoryChange {
+        self.set_pinned(id, true)
+    }
+
+    /// Returns an item to the unpinned group, where it is subject to retention
+    /// again and may be dropped immediately if the limit is already reached.
+    pub fn unpin(&mut self, id: HistoryItemId) -> HistoryChange {
+        self.set_pinned(id, false)
+    }
+
+    pub fn delete(&mut self, id: HistoryItemId) -> HistoryChange {
+        let Some(index) = self.items.iter().position(|item| item.id() == id) else {
+            return HistoryChange::Rejected;
+        };
+
+        self.items.remove(index);
+        self.persist(PersistenceMutation::Delete {
+            removed_ids: vec![id],
+        });
+        HistoryChange::Applied
+    }
+
+    /// Removes every unpinned item. Pinned items are always kept.
+    pub fn clear_unpinned(&mut self) -> HistoryChange {
+        if !self.has_unpinned() {
+            return HistoryChange::Rejected;
+        }
+
+        self.items.retain(TextHistoryItem::is_pinned);
+        self.persist(PersistenceMutation::ClearUnpinned);
+        HistoryChange::Applied
+    }
+
+    pub fn has_unpinned(&self) -> bool {
+        self.items.iter().any(|item| !item.is_pinned())
+    }
+
     pub(crate) fn shutdown_persistence(&mut self) {
         self.persistence.take();
+    }
+
+    fn set_pinned(&mut self, id: HistoryItemId, pinned: bool) -> HistoryChange {
+        let Some(index) = self.items.iter().position(|item| item.id() == id) else {
+            return HistoryChange::Rejected;
+        };
+        if self.items[index].is_pinned() == pinned {
+            return HistoryChange::Rejected;
+        }
+
+        self.items[index].set_pinned(pinned);
+        let item = self.items[index].clone();
+        sort_items(&mut self.items);
+        // Unpinning can push the history back over the retention limit, and the
+        // item that was just unpinned may itself be the oldest one.
+        let removed_ids = self.enforce_retention();
+        self.persist(PersistenceMutation::Upsert { item, removed_ids });
+        HistoryChange::Applied
+    }
+
+    fn newest_sequence(&self) -> i64 {
+        self.items
+            .iter()
+            .map(TextHistoryItem::last_used_sequence)
+            .max()
+            .unwrap_or(i64::MIN)
     }
 
     fn enforce_retention(&mut self) -> Vec<HistoryItemId> {
@@ -148,6 +235,16 @@ impl TextHistory {
             persistence.submit(mutation);
         }
     }
+}
+
+fn sort_items(items: &mut [TextHistoryItem]) {
+    items.sort_by_key(|item| {
+        (
+            std::cmp::Reverse(item.is_pinned()),
+            std::cmp::Reverse(item.last_used_sequence()),
+            std::cmp::Reverse(item.id().value()),
+        )
+    });
 }
 
 fn next_value(values: impl Iterator<Item = i64>) -> Option<i64> {
@@ -320,8 +417,136 @@ mod tests {
 
         assert_eq!(
             texts(&history),
-            ["new unpinned", "new pinned", "oldest pinned"]
+            ["new pinned", "oldest pinned", "new unpinned"]
         );
+    }
+
+    #[test]
+    fn pinned_items_are_ordered_before_unpinned_items_by_recency() {
+        let mut history = TextHistory::default();
+        history.record("first".into());
+        let first_id = history.items()[0].id();
+        history.record("second".into());
+        let second_id = history.items()[0].id();
+        history.record("third".into());
+
+        assert_eq!(history.pin(first_id), HistoryChange::Applied);
+        assert_eq!(texts(&history), ["first", "third", "second"]);
+
+        assert_eq!(history.pin(second_id), HistoryChange::Applied);
+        assert_eq!(texts(&history), ["second", "first", "third"]);
+    }
+
+    #[test]
+    fn pinning_an_already_pinned_or_unknown_item_changes_nothing() {
+        let mut history = TextHistory::default();
+        history.record("only".into());
+        let id = history.items()[0].id();
+        history.pin(id);
+        let before = history.items().to_vec();
+
+        assert_eq!(history.pin(id), HistoryChange::Rejected);
+        assert_eq!(
+            history.unpin(HistoryItemId::new(9_999)),
+            HistoryChange::Rejected
+        );
+        assert_eq!(
+            history.delete(HistoryItemId::new(9_999)),
+            HistoryChange::Rejected
+        );
+        assert_eq!(history.items(), before);
+    }
+
+    #[test]
+    fn unpinning_returns_the_item_to_recency_order() {
+        let mut history = TextHistory::default();
+        history.record("first".into());
+        let first_id = history.items()[0].id();
+        history.record("second".into());
+        history.pin(first_id);
+        assert_eq!(texts(&history), ["first", "second"]);
+
+        assert_eq!(history.unpin(first_id), HistoryChange::Applied);
+        assert_eq!(texts(&history), ["second", "first"]);
+    }
+
+    #[test]
+    fn recopying_keeps_an_item_in_its_group_and_refreshes_recency() {
+        let mut history = TextHistory::default();
+        history.record("pinned".into());
+        let pinned_id = history.items()[0].id();
+        history.pin(pinned_id);
+        history.record("older".into());
+        history.record("newer".into());
+        assert_eq!(texts(&history), ["pinned", "newer", "older"]);
+
+        assert_eq!(history.record("older".into()), HistoryUpdate::MovedToFront);
+        assert_eq!(texts(&history), ["pinned", "older", "newer"]);
+
+        assert_eq!(history.record("pinned".into()), HistoryUpdate::MovedToFront);
+        assert_eq!(texts(&history), ["pinned", "older", "newer"]);
+        assert_eq!(history.items()[0].id(), pinned_id);
+        assert_eq!(history.record("pinned".into()), HistoryUpdate::Unchanged);
+    }
+
+    #[test]
+    fn unpinning_can_drop_the_item_when_retention_is_already_full() {
+        let mut history = TextHistory::from_items(
+            vec![item(0, "pinned", 0, true), item(1, "unpinned", 1, false)],
+            1,
+            None,
+        );
+
+        assert_eq!(history.unpin(HistoryItemId::new(0)), HistoryChange::Applied);
+        assert_eq!(texts(&history), ["unpinned"]);
+    }
+
+    #[test]
+    fn deleting_removes_only_the_requested_item() {
+        let mut history = TextHistory::default();
+        history.record("first".into());
+        history.record("second".into());
+        let second_id = history.items()[0].id();
+
+        assert_eq!(history.delete(second_id), HistoryChange::Applied);
+        assert_eq!(texts(&history), ["first"]);
+        assert_eq!(history.item(second_id), None);
+        assert_eq!(history.delete(second_id), HistoryChange::Rejected);
+    }
+
+    #[test]
+    fn clearing_removes_unpinned_items_and_keeps_pinned_items() {
+        let mut history = TextHistory::default();
+        history.record("keep".into());
+        let keep_id = history.items()[0].id();
+        history.pin(keep_id);
+        history.record("drop one".into());
+        history.record("drop two".into());
+
+        assert_eq!(history.clear_unpinned(), HistoryChange::Applied);
+        assert_eq!(texts(&history), ["keep"]);
+        assert!(!history.has_unpinned());
+        assert_eq!(history.clear_unpinned(), HistoryChange::Rejected);
+    }
+
+    #[test]
+    fn search_filters_the_loaded_history_without_changing_it() {
+        let mut history = TextHistory::default();
+        history.record("Alpha".into());
+        history.record("beta".into());
+        let before = history.items().to_vec();
+
+        let matches = history.search(&HistoryQuery::new("ALPHA"));
+
+        assert_eq!(
+            matches
+                .into_iter()
+                .map(TextHistoryItem::text)
+                .collect::<Vec<_>>(),
+            ["Alpha"]
+        );
+        assert!(history.search(&HistoryQuery::new("")).len() == 2);
+        assert_eq!(history.items(), before);
     }
 
     #[test]
@@ -414,10 +639,86 @@ mod tests {
         drop(worker);
 
         let history = TextHistory::persistent_with_limit(database.path.clone(), 2).unwrap();
-        assert_eq!(texts(&history), ["item 4", "item 3", "item 0"]);
+        assert_eq!(texts(&history), ["item 0", "item 4", "item 3"]);
         drop(history);
 
         let reopened = TextHistory::persistent_with_limit(database.path.clone(), 2).unwrap();
-        assert_eq!(texts(&reopened), ["item 4", "item 3", "item 0"]);
+        assert_eq!(texts(&reopened), ["item 0", "item 4", "item 3"]);
+    }
+
+    #[test]
+    fn pin_and_unpin_survive_restart() {
+        let database = TestDatabase::new("pin-restart");
+        let mut history = TextHistory::persistent(database.path.clone()).unwrap();
+        history.record("pin me".into());
+        let pinned_id = history.items()[0].id();
+        history.record("other".into());
+        history.pin(pinned_id);
+        drop(history);
+
+        let mut reopened = TextHistory::persistent(database.path.clone()).unwrap();
+        assert_eq!(texts(&reopened), ["pin me", "other"]);
+        assert!(reopened.items()[0].is_pinned());
+        assert_eq!(reopened.items()[0].id(), pinned_id);
+        reopened.unpin(pinned_id);
+        drop(reopened);
+
+        let reopened_again = TextHistory::persistent(database.path.clone()).unwrap();
+        assert_eq!(texts(&reopened_again), ["other", "pin me"]);
+        assert!(reopened_again.items().iter().all(|item| !item.is_pinned()));
+    }
+
+    #[test]
+    fn pinned_items_are_exempt_from_retention_across_restart() {
+        let database = TestDatabase::new("pin-retention");
+        let mut history = TextHistory::persistent_with_limit(database.path.clone(), 2).unwrap();
+        history.record("pinned".into());
+        let pinned_id = history.items()[0].id();
+        history.pin(pinned_id);
+        for index in 0..5 {
+            history.record(format!("item {index}"));
+        }
+        assert_eq!(texts(&history), ["pinned", "item 4", "item 3"]);
+        drop(history);
+
+        let reopened = TextHistory::persistent_with_limit(database.path.clone(), 2).unwrap();
+        assert_eq!(texts(&reopened), ["pinned", "item 4", "item 3"]);
+    }
+
+    #[test]
+    fn deletion_is_persisted() {
+        let database = TestDatabase::new("delete-restart");
+        let mut history = TextHistory::persistent(database.path.clone()).unwrap();
+        history.record("keep".into());
+        history.record("remove".into());
+        let removed_id = history.items()[0].id();
+        assert_eq!(history.delete(removed_id), HistoryChange::Applied);
+        drop(history);
+
+        let reopened = TextHistory::persistent(database.path.clone()).unwrap();
+        assert_eq!(texts(&reopened), ["keep"]);
+    }
+
+    #[test]
+    fn clearing_unpinned_history_is_persisted() {
+        let database = TestDatabase::new("clear-restart");
+        let mut history = TextHistory::persistent(database.path.clone()).unwrap();
+        history.record("pinned".into());
+        let pinned_id = history.items()[0].id();
+        history.pin(pinned_id);
+        for index in 0..3 {
+            history.record(format!("item {index}"));
+        }
+        assert_eq!(history.clear_unpinned(), HistoryChange::Applied);
+        assert_eq!(texts(&history), ["pinned"]);
+        drop(history);
+
+        let mut reopened = TextHistory::persistent(database.path.clone()).unwrap();
+        assert_eq!(texts(&reopened), ["pinned"]);
+        reopened.record("after clear".into());
+        drop(reopened);
+
+        let reopened_again = TextHistory::persistent(database.path.clone()).unwrap();
+        assert_eq!(texts(&reopened_again), ["pinned", "after clear"]);
     }
 }
