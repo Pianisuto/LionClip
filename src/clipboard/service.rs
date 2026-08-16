@@ -8,6 +8,7 @@ use gtk::{gdk, gio, gio::prelude::InputStreamExtManual, glib, prelude::ObjectExt
 
 use crate::{
     history::{HistoryUpdate, ImageData, ImageMime, TextHistory},
+    image_cleanup::ImageCleanupCoordinator,
     image_store::{self, MAX_IMAGE_ENCODED_BYTES},
     storage::StoragePaths,
 };
@@ -68,6 +69,7 @@ impl ClipboardService {
         history: Rc<RefCell<TextHistory>>,
         history_changed: HistoryChangedCallback,
         paths: StoragePaths,
+        image_cleanup: ImageCleanupCoordinator,
     ) -> Self {
         let suppression = Rc::new(RefCell::new(SelfWriteSuppression::default()));
         let writer = ClipboardWriter {
@@ -83,6 +85,7 @@ impl ClipboardService {
             let suppression = suppression.clone();
             let change_sequence = change_sequence.clone();
             let paths = paths.clone();
+            let image_cleanup = image_cleanup.clone();
 
             move |clipboard| {
                 let sequence = change_sequence.get().wrapping_add(1);
@@ -98,6 +101,7 @@ impl ClipboardService {
                         history_changed.clone(),
                         suppression.clone(),
                         paths.clone(),
+                        image_cleanup.clone(),
                     );
                 } else {
                     capture_text(
@@ -187,57 +191,51 @@ fn capture_image(
     history_changed: HistoryChangedCallback,
     suppression: Rc<RefCell<SelfWriteSuppression>>,
     paths: StoragePaths,
+    image_cleanup: ImageCleanupCoordinator,
 ) {
-    glib::MainContext::default().spawn_local(async move {
-        let (stream, negotiated_mime) = match clipboard
-            .read_future(&[requested_mime.as_str()], glib::Priority::DEFAULT)
-            .await
-        {
-            Ok(value) => value,
-            Err(_) => {
-                fallback_to_text(
-                    clipboard,
-                    sequence,
-                    change_sequence,
-                    history,
-                    history_changed,
-                    suppression,
-                );
-                return;
-            }
-        };
-        if change_sequence.get() != sequence {
-            return;
-        }
-        let mime_type = ImageMime::SUPPORTED
-            .into_iter()
-            .find(|candidate| *candidate == negotiated_mime.as_str())
-            .and_then(ImageMime::parse)
-            .unwrap_or(requested_mime);
+    // Mark the whole asynchronous capture, including blob publication and the
+    // history decision, as in-flight. History cleanup cannot unlink an image
+    // blob until every capture has settled.
+    image_cleanup.begin_capture();
+    let finish_history = history.clone();
+    let finish_cleanup = image_cleanup.clone();
 
-        let buffer = vec![0_u8; MAX_IMAGE_ENCODED_BYTES + 1];
-        let (mut bytes, read, partial_error) = match stream
-            .read_all_future(buffer, glib::Priority::DEFAULT)
-            .await
-        {
-            Ok(value) => value,
-            Err((_buffer, _error)) => {
-                fallback_to_text(
-                    clipboard,
-                    sequence,
-                    change_sequence,
-                    history,
-                    history_changed,
-                    suppression,
-                );
-                return;
-            }
-        };
-        if change_sequence.get() != sequence {
-            return;
-        }
-        if partial_error.is_some() || read == 0 || read > MAX_IMAGE_ENCODED_BYTES {
-            eprintln!("lionclip: image capture rejected reason=encoded-size-or-read");
+    glib::MainContext::default().spawn_local(async move {
+        capture_image_task(
+            clipboard,
+            requested_mime,
+            sequence,
+            change_sequence,
+            history,
+            history_changed,
+            suppression,
+            paths,
+            image_cleanup,
+        )
+        .await;
+
+        finish_cleanup.finish_capture(finish_history.borrow().items());
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_image_task(
+    clipboard: gdk::Clipboard,
+    requested_mime: ImageMime,
+    sequence: u64,
+    change_sequence: Rc<Cell<u64>>,
+    history: Rc<RefCell<TextHistory>>,
+    history_changed: HistoryChangedCallback,
+    suppression: Rc<RefCell<SelfWriteSuppression>>,
+    paths: StoragePaths,
+    image_cleanup: ImageCleanupCoordinator,
+) {
+    let (stream, negotiated_mime) = match clipboard
+        .read_future(&[requested_mime.as_str()], glib::Priority::DEFAULT)
+        .await
+    {
+        Ok(value) => value,
+        Err(_) => {
             fallback_to_text(
                 clipboard,
                 sequence,
@@ -248,61 +246,103 @@ fn capture_image(
             );
             return;
         }
-        bytes.truncate(read);
+    };
+    if change_sequence.get() != sequence {
+        return;
+    }
+    let mime_type = ImageMime::SUPPORTED
+        .into_iter()
+        .find(|candidate| *candidate == negotiated_mime.as_str())
+        .and_then(ImageMime::parse)
+        .unwrap_or(requested_mime);
 
-        let worker_paths = paths.clone();
-        let stored = match gio::spawn_blocking(move || {
-            image_store::process_and_store(&worker_paths, mime_type, bytes)
-        })
+    let buffer = vec![0_u8; MAX_IMAGE_ENCODED_BYTES + 1];
+    let (mut bytes, read, partial_error) = match stream
+        .read_all_future(buffer, glib::Priority::DEFAULT)
         .await
-        {
-            Ok(Ok(stored)) => stored,
-            Ok(Err(error)) => {
-                eprintln!(
-                    "lionclip: image capture rejected reason={}",
-                    error.diagnostic()
-                );
-                fallback_to_text(
-                    clipboard,
-                    sequence,
-                    change_sequence,
-                    history,
-                    history_changed,
-                    suppression,
-                );
-                return;
-            }
-            Err(_) => {
-                eprintln!("lionclip: image capture rejected reason=worker-panic");
-                fallback_to_text(
-                    clipboard,
-                    sequence,
-                    change_sequence,
-                    history,
-                    history_changed,
-                    suppression,
-                );
-                return;
-            }
-        };
-
-        if change_sequence.get() != sequence {
-            cleanup_new_stale_asset(&paths, &history, &stored);
+    {
+        Ok(value) => value,
+        Err((_buffer, _error)) => {
+            fallback_to_text(
+                clipboard,
+                sequence,
+                change_sequence,
+                history,
+                history_changed,
+                suppression,
+            );
             return;
         }
-        if suppression
-            .borrow_mut()
-            .should_suppress_image(stored.image.content_hash())
-        {
+    };
+    if change_sequence.get() != sequence {
+        return;
+    }
+    if partial_error.is_some() || read == 0 || read > MAX_IMAGE_ENCODED_BYTES {
+        eprintln!("lionclip: image capture rejected reason=encoded-size-or-read");
+        fallback_to_text(
+            clipboard,
+            sequence,
+            change_sequence,
+            history,
+            history_changed,
+            suppression,
+        );
+        return;
+    }
+    bytes.truncate(read);
+
+    let worker_paths = paths.clone();
+    let stored = match gio::spawn_blocking(move || {
+        image_store::process_and_store(&worker_paths, mime_type, bytes)
+    })
+    .await
+    {
+        Ok(Ok(stored)) => stored,
+        Ok(Err(error)) => {
+            eprintln!(
+                "lionclip: image capture rejected reason={}",
+                error.diagnostic()
+            );
+            fallback_to_text(
+                clipboard,
+                sequence,
+                change_sequence,
+                history,
+                history_changed,
+                suppression,
+            );
             return;
         }
-
-        let update = history.borrow_mut().record_image(stored.image.clone());
-        if matches!(update, HistoryUpdate::Rejected) {
-            cleanup_new_stale_asset(&paths, &history, &stored);
+        Err(_) => {
+            eprintln!("lionclip: image capture rejected reason=worker-panic");
+            fallback_to_text(
+                clipboard,
+                sequence,
+                change_sequence,
+                history,
+                history_changed,
+                suppression,
+            );
+            return;
         }
-        notify_if_changed(update, &history_changed);
-    });
+    };
+
+    if change_sequence.get() != sequence {
+        image_cleanup.queue(stored.image);
+        return;
+    }
+    if suppression
+        .borrow_mut()
+        .should_suppress_image(stored.image.content_hash())
+    {
+        return;
+    }
+
+    let update = history.borrow_mut().record_image(stored.image.clone());
+    if matches!(update, HistoryUpdate::Rejected) {
+        image_cleanup.queue(stored.image);
+    }
+    notify_if_changed(update, &history_changed);
 }
 
 fn fallback_to_text(
@@ -324,30 +364,6 @@ fn fallback_to_text(
         history_changed,
         suppression,
     );
-}
-
-fn cleanup_new_stale_asset(
-    paths: &StoragePaths,
-    history: &Rc<RefCell<TextHistory>>,
-    stored: &image_store::StoredImage,
-) {
-    if !stored.original_created
-        || history
-            .borrow()
-            .contains_image_hash(stored.image.content_hash())
-    {
-        return;
-    }
-    let paths = paths.clone();
-    let image = stored.image.clone();
-    glib::MainContext::default().spawn_local(async move {
-        if gio::spawn_blocking(move || image_store::delete_asset(&paths, &image))
-            .await
-            .is_err()
-        {
-            eprintln!("lionclip: image storage cleanup failed stage=worker-panic");
-        }
-    });
 }
 
 fn notify_if_changed(update: HistoryUpdate, history_changed: &HistoryChangedCallback) {
