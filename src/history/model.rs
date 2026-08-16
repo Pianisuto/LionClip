@@ -41,7 +41,7 @@ impl ImageMime {
         }
     }
 
-    pub(super) fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "image/png" => Some(Self::Png),
             "image/jpeg" => Some(Self::Jpeg),
@@ -112,8 +112,6 @@ pub struct HistoryItem {
     pinned: bool,
 }
 
-/// Compatibility alias kept so the Phase 1-3 test helpers and callers do not
-/// need to churn merely because the item model gained another typed payload.
 pub type TextHistoryItem = HistoryItem;
 
 impl HistoryItem {
@@ -181,8 +179,8 @@ impl HistoryItem {
         }
     }
 
-    /// Phase 1-3 compatibility accessor. New code that can receive image items
-    /// should prefer [`Self::as_text`].
+    /// Compatibility accessor for the Phase 1-3 text-only call sites/tests.
+    /// Mixed-payload code should prefer [`Self::as_text`].
     pub fn text(&self) -> &str {
         self.as_text().unwrap_or("")
     }
