@@ -12,11 +12,17 @@ const PREVIEW_CHARS: usize = 180;
 const PREVIEW_WIDTH_CHARS: i32 = 42;
 const WHITESPACE_PREVIEW: &str = "(whitespace)";
 
+/// A result row plus the action buttons keyboard navigation moves through.
+pub(super) struct RowWidgets {
+    pub(super) row: gtk::ListBoxRow,
+    pub(super) actions: [gtk::Button; 2],
+}
+
 pub(super) fn build(
     item: &TextHistoryItem,
     on_toggle_pin: impl Fn() + 'static,
     on_delete: impl Fn() + 'static,
-) -> gtk::ListBoxRow {
+) -> RowWidgets {
     let preview = gtk::Label::builder()
         .label(preview_text(item.text()))
         .ellipsize(pango::EllipsizeMode::End)
@@ -63,11 +69,16 @@ pub(super) fn build(
     content.append(&preview);
     content.append(&actions);
 
-    gtk::ListBoxRow::builder()
+    let row = gtk::ListBoxRow::builder()
         .activatable(true)
         .selectable(true)
         .child(&content)
-        .build()
+        .build();
+
+    RowWidgets {
+        row,
+        actions: [pin, delete],
+    }
 }
 
 fn action_button(icon_name: &str, label: &str) -> gtk::Button {

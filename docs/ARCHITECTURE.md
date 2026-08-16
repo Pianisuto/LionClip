@@ -305,6 +305,9 @@ a dim rectangle under the popup.
 - `Escape` clears a non-empty search, otherwise hides the popup;
 - `Delete` removes the selected item when focus is in the result list, so it
   still edits text while the search field has focus;
+- `Right`/`Left` reach the selected row's pin and delete buttons and step back
+  out of them, but only while the search field is empty: with text in it they
+  stay with the caret;
 - `Ctrl+F` focuses search, `Ctrl+P` pins/unpins the selection;
 - clicking a row restores it; clicking a row action does not restore it.
 

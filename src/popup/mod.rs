@@ -52,6 +52,13 @@ row:focus-within .lionclip-actions,
 /// `None` when the platform cannot answer.
 type KeyboardFocusProbe = Box<dyn Fn(&adw::ApplicationWindow) -> Option<bool>>;
 
+/// A rendered result: the item it stands for and the buttons the keyboard can
+/// reach inside it.
+struct VisibleRow {
+    id: HistoryItemId,
+    actions: [gtk::Button; 2],
+}
+
 pub struct HistoryPopup {
     pub window: adw::ApplicationWindow,
     state: Rc<PopupState>,
@@ -67,7 +74,7 @@ struct PopupState {
     placeholder_title: gtk::Label,
     placeholder_body: gtk::Label,
     clear_action: gio::SimpleAction,
-    visible_ids: RefCell<Vec<HistoryItemId>>,
+    visible: RefCell<Vec<VisibleRow>>,
     restore: Box<dyn Fn(HistoryItemId)>,
     /// Answering `None` falls back to trusting the toplevel's own state.
     keeps_keyboard_focus: KeyboardFocusProbe,
@@ -198,7 +205,7 @@ pub fn build(
         placeholder_title,
         placeholder_body,
         clear_action: clear_action.clone(),
-        visible_ids: RefCell::new(Vec::new()),
+        visible: RefCell::new(Vec::new()),
         restore: Box::new(on_restore),
         keeps_keyboard_focus: Box::new(keeps_keyboard_focus),
         suppression_depth: Cell::new(0),
@@ -335,24 +342,28 @@ impl PopupState {
             self.list.remove(&child);
         }
 
-        let mut visible_ids = Vec::new();
+        let mut visible = Vec::new();
         {
             let history = self.history.borrow();
             self.clear_action.set_enabled(history.has_unpinned());
 
             for item in history.search(&query) {
-                visible_ids.push(item.id());
-                self.list.append(&self.build_row(item));
+                let widgets = self.build_row(item);
+                self.list.append(&widgets.row);
+                visible.push(VisibleRow {
+                    id: item.id(),
+                    actions: widgets.actions,
+                });
             }
 
-            self.update_placeholder(history.items().is_empty(), visible_ids.is_empty());
+            self.update_placeholder(history.items().is_empty(), visible.is_empty());
         }
-        *self.visible_ids.borrow_mut() = visible_ids;
+        *self.visible.borrow_mut() = visible;
 
         self.restore_selection(prefer, fallback_index, keep_list_focus);
     }
 
-    fn build_row(self: &Rc<Self>, item: &TextHistoryItem) -> gtk::ListBoxRow {
+    fn build_row(self: &Rc<Self>, item: &TextHistoryItem) -> row::RowWidgets {
         let id = item.id();
 
         row::build(
@@ -403,7 +414,7 @@ impl PopupState {
         fallback_index: usize,
         keep_list_focus: bool,
     ) {
-        let count = self.visible_ids.borrow().len();
+        let count = self.visible.borrow().len();
         if count == 0 {
             self.focus_search();
             return;
@@ -447,6 +458,14 @@ impl PopupState {
             }
             gdk::Key::Down | gdk::Key::KP_Down => {
                 self.move_selection(1);
+                glib::Propagation::Stop
+            }
+            gdk::Key::Right | gdk::Key::KP_Right if self.horizontal_arrows_navigate() => {
+                self.move_action_focus(true);
+                glib::Propagation::Stop
+            }
+            gdk::Key::Left | gdk::Key::KP_Left if self.horizontal_arrows_navigate() => {
+                self.move_action_focus(false);
                 glib::Propagation::Stop
             }
             // Enter and Space belong to the focused control when that control
@@ -507,8 +526,51 @@ impl PopupState {
         glib::Propagation::Stop
     }
 
+    /// Whether Left/Right should reach the row actions instead of the search
+    /// caret.
+    ///
+    /// The search field keeps them while it holds text to move through; with an
+    /// empty field there is nothing to move, so the arrows are free to reach the
+    /// selected result's actions. Inside the result list they always navigate.
+    fn horizontal_arrows_navigate(&self) -> bool {
+        if self.focus_within(&self.search) {
+            return self.search.text().is_empty();
+        }
+        self.focus_within(&self.list)
+    }
+
+    /// Moves the keyboard focus across the selected row: its pin and delete
+    /// buttons going forward, and back to the row itself going backward.
+    fn move_action_focus(&self, forward: bool) {
+        let Some(index) = self.selected_index() else {
+            return;
+        };
+        let actions = {
+            let visible = self.visible.borrow();
+            let Some(row) = visible.get(index) else {
+                return;
+            };
+            row.actions.clone()
+        };
+
+        let focused = actions.iter().position(|action| self.focus_within(action));
+        match (focused, forward) {
+            (None, true) => actions[0].grab_focus(),
+            (Some(current), true) => actions[(current + 1).min(actions.len() - 1)].grab_focus(),
+            (Some(0), false) => {
+                if let Some(row) = self.row_at(index) {
+                    row.grab_focus()
+                } else {
+                    false
+                }
+            }
+            (Some(current), false) => actions[current - 1].grab_focus(),
+            (None, false) => return,
+        };
+    }
+
     fn move_selection(&self, delta: i32) {
-        let count = self.visible_ids.borrow().len();
+        let count = self.visible.borrow().len();
         if count == 0 {
             self.focus_search();
             return;
@@ -711,16 +773,16 @@ impl PopupState {
     }
 
     fn index_of(&self, id: HistoryItemId) -> Option<usize> {
-        self.visible_ids
+        self.visible
             .borrow()
             .iter()
-            .position(|candidate| *candidate == id)
+            .position(|candidate| candidate.id == id)
     }
 
     fn id_at(&self, index: i32) -> Option<HistoryItemId> {
         usize::try_from(index)
             .ok()
-            .and_then(|index| self.visible_ids.borrow().get(index).copied())
+            .and_then(|index| self.visible.borrow().get(index).map(|row| row.id))
     }
 
     fn selected_index(&self) -> Option<usize> {
@@ -731,7 +793,7 @@ impl PopupState {
 
     fn selected_id(&self) -> Option<HistoryItemId> {
         let index = self.selected_index()?;
-        self.visible_ids.borrow().get(index).copied()
+        self.visible.borrow().get(index).map(|row| row.id)
     }
 
     fn set_search_text(&self, text: &str) {
