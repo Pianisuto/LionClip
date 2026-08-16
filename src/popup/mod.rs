@@ -47,10 +47,16 @@ struct PopupState {
     clear_action: gio::SimpleAction,
     visible_ids: RefCell<Vec<HistoryItemId>>,
     restore: Box<dyn Fn(HistoryItemId)>,
-    /// Set while one of the popup's own surfaces (overflow menu, confirmation
-    /// dialog) owns the focus, so the popup does not hide itself before the
-    /// interaction it was opened for can complete.
-    suppress_auto_hide: Cell<bool>,
+    /// Number of the popup's own surfaces (overflow menu, confirmation dialog)
+    /// that currently own the focus, so the popup does not hide itself before
+    /// the interaction it was opened for can complete. A count rather than a
+    /// flag because one surface hands over to the next: activating a menu item
+    /// opens the dialog while the menu is still closing.
+    suppression_depth: Cell<u32>,
+    /// Set when the toplevel went inactive while suppressed. Clearing the
+    /// suppression cannot rely on a further `is-active` notification, so the
+    /// hide condition is re-checked once when the internal surface closes.
+    deferred_hide_check: Cell<bool>,
     /// Guards programmatic search-field updates from re-entering the filter.
     updating_search: Cell<bool>,
 }
@@ -164,7 +170,8 @@ pub fn build(
         clear_action: clear_action.clone(),
         visible_ids: RefCell::new(Vec::new()),
         restore: Box::new(on_restore),
-        suppress_auto_hide: Cell::new(false),
+        suppression_depth: Cell::new(0),
+        deferred_hide_check: Cell::new(false),
         updating_search: Cell::new(false),
     });
 
@@ -200,8 +207,13 @@ pub fn build(
         let state = Rc::downgrade(&state);
 
         move |menu_button| {
-            if let Some(state) = state.upgrade() {
-                state.suppress_auto_hide.set(menu_button.is_active());
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            if menu_button.is_active() {
+                state.suppress_auto_hide();
+            } else {
+                state.release_auto_hide_suppression();
             }
         }
     });
@@ -233,12 +245,9 @@ pub fn build(
     window.connect_is_active_notify({
         let state = Rc::downgrade(&state);
 
-        move |window| {
-            let Some(state) = state.upgrade() else {
-                return;
-            };
-            if !window.is_active() && !state.suppress_auto_hide.get() {
-                state.hide();
+        move |_| {
+            if let Some(state) = state.upgrade() {
+                state.hide_if_inactive();
             }
         }
     });
@@ -262,6 +271,10 @@ impl HistoryPopup {
     /// Resets the transient search state and shows the popup with the newest
     /// item selected. Persistent history state is never reset here.
     pub fn present(&self) {
+        // Opening always starts from a known state, so suppression can never
+        // stay stuck from an earlier menu or dialog.
+        self.state.suppression_depth.set(0);
+        self.state.deferred_hide_check.set(false);
         self.state.set_search_text_silently("");
         self.state.rebuild(None, 0);
         self.window.present();
@@ -392,6 +405,18 @@ impl PopupState {
                 self.move_selection(1);
                 glib::Propagation::Stop
             }
+            // Enter and Space belong to the focused control when that control
+            // activates itself, so a focused row action or the overflow menu
+            // button is never shadowed by the window shortcuts.
+            gdk::Key::Return
+            | gdk::Key::KP_Enter
+            | gdk::Key::ISO_Enter
+            | gdk::Key::space
+            | gdk::Key::KP_Space
+                if self.focus_owns_activation() =>
+            {
+                glib::Propagation::Proceed
+            }
             gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter => {
                 if let Some(id) = self.selected_id() {
                     self.restore_item(id);
@@ -507,7 +532,7 @@ impl PopupState {
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
 
-        self.suppress_auto_hide.set(true);
+        self.suppress_auto_hide();
         dialog.connect_response(None, {
             let state = Rc::downgrade(self);
 
@@ -515,13 +540,13 @@ impl PopupState {
                 let Some(state) = state.upgrade() else {
                     return;
                 };
-                state.suppress_auto_hide.set(false);
 
                 if response == "clear" && state.history.borrow_mut().clear_unpinned().changed() {
                     state.set_search_text_silently("");
                     state.rebuild(None, 0);
                 }
                 state.focus_search();
+                state.release_auto_hide_suppression();
             }
         });
         dialog.present();
@@ -529,6 +554,65 @@ impl PopupState {
 
     fn hide(&self) {
         self.window.set_visible(false);
+    }
+
+    /// Single decision point for the auto-hide: the popup hides when the
+    /// toplevel is inactive and none of the popup's own surfaces is open.
+    fn hide_if_inactive(&self) {
+        if self.window.is_active() {
+            self.deferred_hide_check.set(false);
+            return;
+        }
+        if self.auto_hide_suppressed() {
+            self.deferred_hide_check.set(true);
+            return;
+        }
+        self.hide();
+    }
+
+    /// Releases the suppression held while one of the popup's own surfaces was
+    /// open, one main-context turn later, and re-checks the hide condition if
+    /// the toplevel went inactive meanwhile.
+    ///
+    /// Both steps are needed and neither uses a timing delay:
+    ///
+    /// 1. a display round trip queues the focus events the closing surface
+    ///    generates — an overflow menu deactivates the toplevel simply by
+    ///    grabbing the keyboard, and dropping that grab deactivates and
+    ///    reactivates it again in quick succession;
+    /// 2. releasing on the next main-context turn keeps that transient
+    ///    deactivation attributed to the popup's own surface, because queued
+    ///    focus events are dispatched before idle sources.
+    ///
+    /// By the time the release runs the activation state has settled: the
+    /// popup stays open when the focus came back to it, and hides when another
+    /// window kept the focus — which is also the case where clearing the flag
+    /// would otherwise produce no further `is-active` notification at all.
+    fn release_auto_hide_suppression(self: &Rc<Self>) {
+        if let Some(display) = gdk::Display::default() {
+            display.sync();
+        }
+
+        let state = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            let depth = state.suppression_depth.get().saturating_sub(1);
+            state.suppression_depth.set(depth);
+            if depth == 0 && state.deferred_hide_check.replace(false) {
+                state.hide_if_inactive();
+            }
+        });
+    }
+
+    fn suppress_auto_hide(&self) {
+        self.suppression_depth
+            .set(self.suppression_depth.get().saturating_add(1));
+    }
+
+    fn auto_hide_suppressed(&self) -> bool {
+        self.suppression_depth.get() > 0
     }
 
     fn focus_search(&self) {
@@ -542,10 +626,28 @@ impl PopupState {
         }
     }
 
+    fn focus_widget(&self) -> Option<gtk::Widget> {
+        gtk::prelude::GtkWindowExt::focus(&self.window)
+    }
+
     fn focus_within(&self, widget: &impl IsA<gtk::Widget>) -> bool {
         let widget = widget.as_ref();
-        gtk::prelude::GtkWindowExt::focus(&self.window)
+        self.focus_widget()
             .is_some_and(|focus| &focus == widget || focus.is_ancestor(widget))
+    }
+
+    /// True when the focused widget is an interactive control that handles its
+    /// own activation keys, such as a row action button or the overflow menu
+    /// button. The search field, a result row and the result list itself all
+    /// leave Enter to the popup.
+    fn focus_owns_activation(&self) -> bool {
+        let Some(focus) = self.focus_widget() else {
+            return false;
+        };
+        if focus.is::<gtk::ListBoxRow>() || &focus == self.list.upcast_ref::<gtk::Widget>() {
+            return false;
+        }
+        !self.focus_within(&self.search)
     }
 
     fn row_at(&self, index: usize) -> Option<gtk::ListBoxRow> {

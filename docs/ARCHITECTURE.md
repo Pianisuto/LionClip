@@ -297,8 +297,23 @@ selection or focus by a four-line stylesheet with no hardcoded colors.
 - `Ctrl+F` focuses search, `Ctrl+P` pins/unpins the selection;
 - clicking a row restores it; clicking a row action does not restore it.
 
-The popup hides when the toplevel loses focus, except while its own overflow
-menu or confirmation dialog holds the focus.
+`Enter` and `Space` are handed back to the focused widget whenever that widget
+activates itself — a row action button or the overflow menu button — so the
+window shortcuts never shadow the control the user tabbed to. The rule is
+structural, not name-based: the search field, a result row and the list itself
+leave activation to the popup, anything else keeps it.
+
+### Focus-loss behavior
+
+The popup hides when the toplevel loses focus. Its own surfaces suppress that
+while they are open, counted rather than flagged because the overflow menu hands
+over to the confirmation dialog while it is still closing. Releasing the
+suppression is itself deferred by one main-context turn after a display round
+trip: dropping a menu's keyboard grab deactivates and reactivates the toplevel
+in quick succession, and that transient deactivation must not be mistaken for
+the user leaving. If the toplevel went inactive while suppressed, the hide
+condition is re-checked once when the last surface closes, because no further
+`is-active` notification would arrive on its own.
 
 ## Positioning
 
