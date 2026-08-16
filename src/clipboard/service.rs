@@ -4,11 +4,7 @@ use std::{
     rc::Rc,
 };
 
-use gtk::{
-    gdk, gio, glib,
-    gio::prelude::InputStreamExtManual,
-    prelude::ObjectExt,
-};
+use gtk::{gdk, gio, gio::prelude::InputStreamExtManual, glib, prelude::ObjectExt};
 
 use crate::{
     history::{HistoryUpdate, ImageData, ImageMime, TextHistory},
