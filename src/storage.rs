@@ -16,7 +16,6 @@ impl fmt::Display for DataPathError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoragePaths {
-    root: PathBuf,
     database: PathBuf,
     blobs: PathBuf,
     thumbnails: PathBuf,
@@ -28,12 +27,7 @@ impl StoragePaths {
             database: root.join("lionclip.db"),
             blobs: root.join("blobs"),
             thumbnails: root.join("thumbnails"),
-            root,
         }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn database(&self) -> &Path {
@@ -54,10 +48,6 @@ pub fn paths() -> Result<StoragePaths, DataPathError> {
         env::var_os("XDG_DATA_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
     )
-}
-
-pub fn database_path() -> Result<PathBuf, DataPathError> {
-    Ok(paths()?.database)
 }
 
 fn paths_from(
@@ -88,7 +78,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(paths.root(), Path::new("/tmp/custom-data/lionclip"));
+        assert_eq!(
+            paths.database().parent(),
+            Some(Path::new("/tmp/custom-data/lionclip"))
+        );
         assert_eq!(
             paths.database(),
             Path::new("/tmp/custom-data/lionclip/lionclip.db")

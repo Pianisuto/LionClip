@@ -10,7 +10,7 @@ use std::{
 };
 
 use gtk::{
-    gdk_pixbuf::{InterpType, PixbufLoader, prelude::*},
+    gdk_pixbuf::{PixbufLoader, prelude::*},
     glib,
 };
 

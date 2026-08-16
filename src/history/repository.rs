@@ -665,9 +665,11 @@ mod tests {
         let connection = Connection::open(storage.paths.database()).unwrap();
         connection.pragma_update(None, "user_version", 99).unwrap();
         drop(connection);
-        assert_eq!(
+        assert!(matches!(
             Repository::open(storage.paths.database()),
-            Err(PersistenceError::at("migration-version-newer"))
-        );
+            Err(PersistenceError {
+                stage: "migration-version-newer"
+            })
+        ));
     }
 }

@@ -179,12 +179,6 @@ impl HistoryItem {
         }
     }
 
-    /// Compatibility accessor for the Phase 1-3 text-only call sites/tests.
-    /// Mixed-payload code should prefer [`Self::as_text`].
-    pub fn text(&self) -> &str {
-        self.as_text().unwrap_or("")
-    }
-
     pub fn is_pinned(&self) -> bool {
         self.pinned
     }
