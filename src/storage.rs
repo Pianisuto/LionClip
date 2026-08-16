@@ -23,6 +23,15 @@ pub struct StoragePaths {
 }
 
 impl StoragePaths {
+    pub(crate) fn for_root(root: PathBuf) -> Self {
+        Self {
+            database: root.join("lionclip.db"),
+            blobs: root.join("blobs"),
+            thumbnails: root.join("thumbnails"),
+            root,
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -64,13 +73,7 @@ fn paths_from(
         })
         .ok_or(DataPathError)?;
 
-    let root = data_home.join("lionclip");
-    Ok(StoragePaths {
-        database: root.join("lionclip.db"),
-        blobs: root.join("blobs"),
-        thumbnails: root.join("thumbnails"),
-        root,
-    })
+    Ok(StoragePaths::for_root(data_home.join("lionclip")))
 }
 
 #[cfg(test)]
@@ -100,7 +103,6 @@ mod tests {
     #[test]
     fn home_fallback_uses_standard_local_share_path() {
         let paths = paths_from(None, Some(OsStr::new("/home/user"))).unwrap();
-
         assert_eq!(
             paths.database(),
             Path::new("/home/user/.local/share/lionclip/lionclip.db")
@@ -110,7 +112,6 @@ mod tests {
     #[test]
     fn empty_xdg_override_uses_home_fallback() {
         let paths = paths_from(Some(OsStr::new("")), Some(OsStr::new("/home/user"))).unwrap();
-
         assert_eq!(
             paths.database(),
             Path::new("/home/user/.local/share/lionclip/lionclip.db")
