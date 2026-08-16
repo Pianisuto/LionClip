@@ -8,10 +8,12 @@ use gtk::{gdk, gio, glib};
 
 use crate::{
     clipboard::{ClipboardService, ClipboardWriter, HistoryChangedCallback},
-    history::TextHistory,
+    history::{HistoryPayload, TextHistory},
+    image_cleanup::ImageCleanupCoordinator,
     popup::{self, HistoryPopup},
     positioning::{PointerAnchor, Positioner, SessionDiagnostics},
-    storage, unix_signals,
+    storage::{self, StoragePaths},
+    unix_signals,
 };
 
 const APPLICATION_ID: &str = "io.github.Pianisuto.LionClip";
@@ -28,7 +30,7 @@ pub fn run() -> glib::ExitCode {
         move |application| {
             if state.borrow().is_none() {
                 let Some(new_state) = AppState::new(application) else {
-                    eprintln!("lionclip: graphical display unavailable");
+                    eprintln!("lionclip: graphical display or data path unavailable");
                     application.quit();
                     return;
                 };
@@ -74,15 +76,28 @@ impl Drop for AppState {
 impl AppState {
     fn new(application: &adw::Application) -> Option<Self> {
         let display = gdk::Display::default()?;
+        let paths = match storage::paths() {
+            Ok(paths) => paths,
+            Err(error) => {
+                eprintln!("lionclip: storage unavailable stage=data-path error={error}");
+                return None;
+            }
+        };
         let diagnostics = SessionDiagnostics::collect();
         println!("{}", diagnostics.log_line());
 
-        let history = Rc::new(RefCell::new(load_history()));
+        let image_cleanup = ImageCleanupCoordinator::new(paths.clone());
+        let history = Rc::new(RefCell::new(load_history(
+            paths.clone(),
+            image_cleanup.clone(),
+        )));
         let history_changed: HistoryChangedCallback = Rc::new(RefCell::new(None));
         let clipboard_service = ClipboardService::start(
             display.clipboard(),
             history.clone(),
             history_changed.clone(),
+            paths,
+            image_cleanup,
         );
         let writer: ClipboardWriter = clipboard_service.writer();
 
@@ -94,8 +109,11 @@ impl AppState {
                 let history = history.clone();
 
                 move |id| {
-                    if let Some(item) = history.borrow().item(id) {
-                        writer.restore_text(item.text());
+                    let payload = history.borrow().item(id).map(|item| item.payload().clone());
+                    match payload {
+                        Some(HistoryPayload::Text(text)) => writer.restore_text(&text),
+                        Some(HistoryPayload::Image(image)) => writer.restore_image(&image),
+                        None => {}
                     }
                 }
             },
@@ -186,23 +204,15 @@ impl AppState {
     }
 }
 
-fn load_history() -> TextHistory {
-    let path = match storage::database_path() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("lionclip: persistence disabled stage=data-path error={error}");
-            return TextHistory::default();
-        }
-    };
-
-    match TextHistory::persistent(path) {
+fn load_history(paths: StoragePaths, image_cleanup: ImageCleanupCoordinator) -> TextHistory {
+    match TextHistory::persistent_with_cleanup(paths, image_cleanup.clone()) {
         Ok(history) => history,
         Err(error) => {
             eprintln!(
                 "lionclip: persistence disabled stage={}",
                 error.diagnostic()
             );
-            TextHistory::default()
+            TextHistory::in_memory_with_cleanup(image_cleanup)
         }
     }
 }

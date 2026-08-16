@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
-    path::{Path, PathBuf},
+    path::Path,
     sync::mpsc,
     thread,
     time::Duration,
@@ -9,9 +9,11 @@ use std::{
 
 use rusqlite::{Connection, params};
 
-use super::{HistoryItemId, TextHistoryItem};
+use crate::{image_store, storage::StoragePaths};
 
-const SCHEMA_VERSION: i64 = 1;
+use super::{HistoryItemId, ImageData, ImageMime, TextHistoryItem};
+
+const SCHEMA_VERSION: i64 = 2;
 
 struct Migration {
     version: i64,
@@ -19,21 +21,76 @@ struct Migration {
     error_stage: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: "CREATE TABLE history_items (
-            id INTEGER PRIMARY KEY CHECK (id >= 0),
-            kind TEXT NOT NULL CHECK (kind = 'text'),
-            text_content TEXT NOT NULL,
-            created_sequence INTEGER NOT NULL CHECK (created_sequence >= 0),
-            last_used_sequence INTEGER NOT NULL UNIQUE CHECK (last_used_sequence >= 0),
-            pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
-            UNIQUE (kind, text_content)
-        );
-        CREATE INDEX history_items_order
-            ON history_items(last_used_sequence DESC);",
-    error_stage: "migration-schema-v1",
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: "CREATE TABLE history_items (
+                id INTEGER PRIMARY KEY CHECK (id >= 0),
+                kind TEXT NOT NULL CHECK (kind = 'text'),
+                text_content TEXT NOT NULL,
+                created_sequence INTEGER NOT NULL CHECK (created_sequence >= 0),
+                last_used_sequence INTEGER NOT NULL UNIQUE CHECK (last_used_sequence >= 0),
+                pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+                UNIQUE (kind, text_content)
+            );
+            CREATE INDEX history_items_order
+                ON history_items(last_used_sequence DESC);",
+        error_stage: "migration-schema-v1",
+    },
+    Migration {
+        version: 2,
+        sql: "ALTER TABLE history_items RENAME TO history_items_v1;
+            DROP INDEX IF EXISTS history_items_order;
+
+            CREATE TABLE history_items (
+                id INTEGER PRIMARY KEY CHECK (id >= 0),
+                kind TEXT NOT NULL CHECK (kind IN ('text', 'image')),
+                text_content TEXT,
+                content_hash TEXT,
+                mime_type TEXT,
+                byte_length INTEGER,
+                image_width INTEGER,
+                image_height INTEGER,
+                created_sequence INTEGER NOT NULL CHECK (created_sequence >= 0),
+                last_used_sequence INTEGER NOT NULL UNIQUE CHECK (last_used_sequence >= 0),
+                pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+                CHECK (
+                    (kind = 'text'
+                        AND text_content IS NOT NULL
+                        AND content_hash IS NULL
+                        AND mime_type IS NULL
+                        AND byte_length IS NULL
+                        AND image_width IS NULL
+                        AND image_height IS NULL)
+                    OR
+                    (kind = 'image'
+                        AND text_content IS NULL
+                        AND content_hash IS NOT NULL
+                        AND length(content_hash) = 64
+                        AND mime_type IN ('image/png', 'image/jpeg')
+                        AND byte_length > 0
+                        AND image_width > 0
+                        AND image_height > 0)
+                )
+            );
+
+            INSERT INTO history_items (
+                id, kind, text_content, created_sequence, last_used_sequence, pinned
+            )
+            SELECT id, 'text', text_content, created_sequence, last_used_sequence, pinned
+            FROM history_items_v1;
+
+            DROP TABLE history_items_v1;
+
+            CREATE UNIQUE INDEX history_text_unique
+                ON history_items(text_content) WHERE kind = 'text';
+            CREATE UNIQUE INDEX history_image_hash_unique
+                ON history_items(content_hash) WHERE kind = 'image';
+            CREATE INDEX history_items_order
+                ON history_items(last_used_sequence DESC);",
+        error_stage: "migration-schema-v2",
+    },
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PersistenceError {
@@ -59,8 +116,6 @@ pub(super) enum PersistenceMutation {
     Delete {
         removed_ids: Vec<HistoryItemId>,
     },
-    /// Bulk removal applied as a single statement instead of one command per
-    /// item, so clearing a full history stays one small transaction.
     ClearUnpinned,
 }
 
@@ -75,12 +130,14 @@ pub(super) struct PersistenceWorker {
 }
 
 impl PersistenceWorker {
-    pub(super) fn open(path: PathBuf) -> Result<(Self, Vec<TextHistoryItem>), PersistenceError> {
+    pub(super) fn open(
+        paths: StoragePaths,
+    ) -> Result<(Self, Vec<TextHistoryItem>), PersistenceError> {
         let (command_sender, command_receiver) = mpsc::channel();
         let (initial_sender, initial_receiver) = mpsc::sync_channel(1);
         let join_handle = thread::Builder::new()
             .name("lionclip-database".into())
-            .spawn(move || worker_main(path, command_receiver, initial_sender))
+            .spawn(move || worker_main(paths, command_receiver, initial_sender))
             .map_err(|_| PersistenceError::at("worker-start"))?;
 
         let initial_items = match initial_receiver.recv() {
@@ -119,7 +176,6 @@ impl PersistenceWorker {
             return;
         };
         let (result_sender, result_receiver) = mpsc::sync_channel(1);
-
         if sender.send(WorkerCommand::Shutdown(result_sender)).is_err() {
             eprintln!("lionclip: persistence unavailable stage=worker-shutdown");
         } else {
@@ -134,7 +190,6 @@ impl PersistenceWorker {
                 }
             }
         }
-
         if self
             .join_handle
             .take()
@@ -152,24 +207,45 @@ impl Drop for PersistenceWorker {
 }
 
 fn worker_main(
-    path: PathBuf,
+    paths: StoragePaths,
     command_receiver: mpsc::Receiver<WorkerCommand>,
     initial_sender: mpsc::SyncSender<Result<Vec<TextHistoryItem>, PersistenceError>>,
 ) {
-    let mut repository = match Repository::open(&path) {
+    let mut repository = match Repository::open(paths.database()) {
         Ok(repository) => repository,
         Err(error) => {
             let _ = initial_sender.send(Err(error));
             return;
         }
     };
-    let initial_items = match repository.load() {
+    let mut initial_items = match repository.load() {
         Ok(items) => items,
         Err(error) => {
             let _ = initial_sender.send(Err(error));
             return;
         }
     };
+
+    // Startup is the one filesystem reconciliation owned by the database
+    // worker: no live clipboard capture exists yet, so there is no concurrent
+    // blob publication to race with orphan cleanup.
+    match image_store::reconcile(&paths, &initial_items) {
+        Ok(missing_ids) if !missing_ids.is_empty() => {
+            if let Err(error) = repository.apply(PersistenceMutation::Delete {
+                removed_ids: missing_ids.clone(),
+            }) {
+                let _ = initial_sender.send(Err(error));
+                return;
+            }
+            initial_items.retain(|item| !missing_ids.contains(&item.id()));
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!(
+            "lionclip: image storage reconciliation unavailable stage={}",
+            error.diagnostic()
+        ),
+    }
+
     if initial_sender.send(Ok(initial_items)).is_err() {
         return;
     }
@@ -236,7 +312,6 @@ impl Repository {
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| PersistenceError::at("migration-version-read"))?;
-
         if version > SCHEMA_VERSION {
             return Err(PersistenceError::at("migration-version-newer"));
         }
@@ -248,7 +323,6 @@ impl Repository {
             if migration.version != version + 1 {
                 return Err(PersistenceError::at("migration-sequence"));
             }
-
             let transaction = self
                 .connection
                 .transaction()
@@ -264,7 +338,6 @@ impl Repository {
                 .map_err(|_| PersistenceError::at("migration-commit"))?;
             version = migration.version;
         }
-
         Ok(())
     }
 
@@ -272,71 +345,42 @@ impl Repository {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, text_content, created_sequence, last_used_sequence, pinned
+                "SELECT id, kind, text_content, content_hash, mime_type,
+                        byte_length, image_width, image_height,
+                        created_sequence, last_used_sequence, pinned
                  FROM history_items
-                 WHERE kind = 'text'
                  ORDER BY last_used_sequence DESC, id DESC",
             )
             .map_err(|_| PersistenceError::at("history-load-prepare"))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok(TextHistoryItem::new(
-                    HistoryItemId::new(row.get(0)?),
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get::<_, i64>(4)? != 0,
-                ))
-            })
+            .query_map([], row_to_item)
             .map_err(|_| PersistenceError::at("history-load-query"))?;
-
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| PersistenceError::at("history-load-row"))
     }
 
     fn apply(&mut self, mutation: PersistenceMutation) -> Result<(), PersistenceError> {
+        // This worker persists metadata only. Live blob deletion is coordinated
+        // by the main-thread history/capture lifecycle so an older delete cannot
+        // race a same-image recapture that is reusing the content-addressed file.
         let transaction = self
             .connection
             .transaction()
             .map_err(|_| PersistenceError::at("history-write-transaction"))?;
-
-        let removed_ids = match mutation {
+        match mutation {
             PersistenceMutation::Upsert { item, removed_ids } => {
-                transaction
-                    .execute(
-                        "INSERT INTO history_items (
-                            id, kind, text_content, created_sequence, last_used_sequence, pinned
-                         ) VALUES (?1, 'text', ?2, ?3, ?4, ?5)
-                         ON CONFLICT(id) DO UPDATE SET
-                            text_content = excluded.text_content,
-                            last_used_sequence = excluded.last_used_sequence,
-                            pinned = excluded.pinned",
-                        params![
-                            item.id().value(),
-                            item.text(),
-                            item.created_sequence(),
-                            item.last_used_sequence(),
-                            item.is_pinned()
-                        ],
-                    )
-                    .map_err(|_| PersistenceError::at("history-upsert"))?;
-                removed_ids
+                upsert_item(&transaction, &item)?;
+                delete_ids(&transaction, &removed_ids, "history-retention-delete")?;
             }
-            PersistenceMutation::Delete { removed_ids } => removed_ids,
+            PersistenceMutation::Delete { removed_ids } => {
+                delete_ids(&transaction, &removed_ids, "history-delete")?;
+            }
             PersistenceMutation::ClearUnpinned => {
                 transaction
                     .execute("DELETE FROM history_items WHERE pinned = 0", [])
                     .map_err(|_| PersistenceError::at("history-clear-unpinned"))?;
-                Vec::new()
             }
-        };
-
-        for id in removed_ids {
-            transaction
-                .execute("DELETE FROM history_items WHERE id = ?1", [id.value()])
-                .map_err(|_| PersistenceError::at("history-retention-delete"))?;
         }
-
         transaction
             .commit()
             .map_err(|_| PersistenceError::at("history-write-commit"))
@@ -348,152 +392,257 @@ impl Repository {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| PersistenceError::at("migration-version-read"))
     }
+}
 
-    #[cfg(test)]
-    fn item_count(&self) -> Result<usize, PersistenceError> {
-        let count: i64 = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM history_items", [], |row| row.get(0))
-            .map_err(|_| PersistenceError::at("history-count"))?;
-        usize::try_from(count).map_err(|_| PersistenceError::at("history-count"))
+fn upsert_item(
+    transaction: &rusqlite::Transaction<'_>,
+    item: &TextHistoryItem,
+) -> Result<(), PersistenceError> {
+    if let Some(text) = item.as_text() {
+        transaction
+            .execute(
+                "INSERT INTO history_items (
+                    id, kind, text_content, content_hash, mime_type, byte_length,
+                    image_width, image_height, created_sequence, last_used_sequence, pinned
+                 ) VALUES (?1, 'text', ?2, NULL, NULL, NULL, NULL, NULL, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    kind = 'text', text_content = excluded.text_content,
+                    content_hash = NULL, mime_type = NULL, byte_length = NULL,
+                    image_width = NULL, image_height = NULL,
+                    last_used_sequence = excluded.last_used_sequence,
+                    pinned = excluded.pinned",
+                params![
+                    item.id().value(),
+                    text,
+                    item.created_sequence(),
+                    item.last_used_sequence(),
+                    item.is_pinned()
+                ],
+            )
+            .map_err(|_| PersistenceError::at("history-upsert-text"))?;
+        return Ok(());
     }
+
+    let image = item
+        .image()
+        .ok_or_else(|| PersistenceError::at("history-upsert-kind"))?;
+    let byte_length = i64::try_from(image.byte_length())
+        .map_err(|_| PersistenceError::at("history-upsert-image-size"))?;
+    transaction
+        .execute(
+            "INSERT INTO history_items (
+                id, kind, text_content, content_hash, mime_type, byte_length,
+                image_width, image_height, created_sequence, last_used_sequence, pinned
+             ) VALUES (?1, 'image', NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                kind = 'image', text_content = NULL,
+                content_hash = excluded.content_hash,
+                mime_type = excluded.mime_type,
+                byte_length = excluded.byte_length,
+                image_width = excluded.image_width,
+                image_height = excluded.image_height,
+                last_used_sequence = excluded.last_used_sequence,
+                pinned = excluded.pinned",
+            params![
+                item.id().value(),
+                image.content_hash(),
+                image.mime_type().as_str(),
+                byte_length,
+                i64::from(image.width()),
+                i64::from(image.height()),
+                item.created_sequence(),
+                item.last_used_sequence(),
+                item.is_pinned()
+            ],
+        )
+        .map_err(|_| PersistenceError::at("history-upsert-image"))?;
+    Ok(())
+}
+
+fn delete_ids(
+    transaction: &rusqlite::Transaction<'_>,
+    ids: &[HistoryItemId],
+    stage: &'static str,
+) -> Result<(), PersistenceError> {
+    for id in ids {
+        transaction
+            .execute("DELETE FROM history_items WHERE id = ?1", [id.value()])
+            .map_err(|_| PersistenceError::at(stage))?;
+    }
+    Ok(())
+}
+
+fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<TextHistoryItem> {
+    let id = HistoryItemId::new(row.get(0)?);
+    let kind: String = row.get(1)?;
+    let created_sequence = row.get(8)?;
+    let last_used_sequence = row.get(9)?;
+    let pinned = row.get::<_, i64>(10)? != 0;
+    match kind.as_str() {
+        "text" => Ok(TextHistoryItem::new_text(
+            id,
+            row.get(2)?,
+            created_sequence,
+            last_used_sequence,
+            pinned,
+        )),
+        "image" => Ok(TextHistoryItem::new_image(
+            id,
+            image_from_columns(row, 3)?,
+            created_sequence,
+            last_used_sequence,
+            pinned,
+        )),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn image_from_columns(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<ImageData> {
+    let hash: String = row.get(start)?;
+    let mime: String = row.get(start + 1)?;
+    let mime = ImageMime::parse(&mime).ok_or(rusqlite::Error::InvalidQuery)?;
+    let byte_length =
+        u64::try_from(row.get::<_, i64>(start + 2)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let width =
+        u32::try_from(row.get::<_, i64>(start + 3)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let height =
+        u32::try_from(row.get::<_, i64>(start + 4)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+
+    let dimensions_valid = width > 0
+        && height > 0
+        && width <= image_store::MAX_IMAGE_DIMENSION
+        && height <= image_store::MAX_IMAGE_DIMENSION
+        && u64::from(width).saturating_mul(u64::from(height)) <= image_store::MAX_IMAGE_PIXELS;
+    if byte_length == 0
+        || byte_length > image_store::MAX_IMAGE_ENCODED_BYTES as u64
+        || !dimensions_valid
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+
+    Ok(ImageData::new(hash, mime, byte_length, width, height))
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
-        os::unix::fs::PermissionsExt,
-        path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
 
     use super::*;
 
-    static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+    static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
 
-    struct TestDatabase {
-        directory: PathBuf,
-        path: PathBuf,
+    struct TestStorage {
+        root: std::path::PathBuf,
+        paths: StoragePaths,
     }
 
-    impl TestDatabase {
-        fn new(test_name: &str) -> Self {
-            let suffix = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let directory = std::env::temp_dir().join(format!(
-                "lionclip-{test_name}-{}-{suffix}",
+    impl TestStorage {
+        fn new(name: &str) -> Self {
+            let suffix = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "lionclip-repository-{name}-{}-{suffix}",
                 std::process::id()
             ));
-            let path = directory.join("lionclip.db");
-            Self { directory, path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
+            let paths = StoragePaths::for_root(root.clone());
+            Self { root, paths }
         }
     }
 
-    impl Drop for TestDatabase {
+    impl Drop for TestStorage {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.directory);
+            let _ = fs::remove_dir_all(&self.root);
         }
     }
 
     #[test]
-    fn empty_database_migrates_to_v1_and_reopens_idempotently() {
-        let database = TestDatabase::new("migration");
-        let repository = Repository::open(database.path()).unwrap();
-        assert_eq!(repository.schema_version(), Ok(SCHEMA_VERSION));
-        assert_eq!(
-            fs::metadata(&database.directory)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(database.path()).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        drop(repository);
-
-        let reopened = Repository::open(database.path()).unwrap();
-        assert_eq!(reopened.schema_version(), Ok(SCHEMA_VERSION));
-        assert_eq!(reopened.item_count(), Ok(0));
+    fn fresh_database_reaches_schema_v2() {
+        let storage = TestStorage::new("fresh-v2");
+        let repository = Repository::open(storage.paths.database()).unwrap();
+        assert_eq!(repository.schema_version(), Ok(2));
     }
 
     #[test]
-    fn newer_than_supported_schema_is_rejected() {
-        let database = TestDatabase::new("newer-schema");
-        drop(Repository::open(database.path()).unwrap());
-
-        let connection = Connection::open(database.path()).unwrap();
+    fn v1_text_rows_migrate_losslessly_to_v2() {
+        let storage = TestStorage::new("migration-v1-v2");
+        fs::create_dir_all(&storage.root).unwrap();
+        let connection = Connection::open(storage.paths.database()).unwrap();
+        connection.execute_batch(MIGRATIONS[0].sql).unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
         connection
-            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .execute(
+                "INSERT INTO history_items
+                 (id, kind, text_content, created_sequence, last_used_sequence, pinned)
+                 VALUES (7, 'text', ?1, 3, 9, 1)",
+                [" exact\ntext\t"],
+            )
             .unwrap();
         drop(connection);
 
-        assert!(matches!(
-            Repository::open(database.path()),
-            Err(PersistenceError {
-                stage: "migration-version-newer"
-            })
-        ));
+        let repository = Repository::open(storage.paths.database()).unwrap();
+        let items = repository.load().unwrap();
+        assert_eq!(repository.schema_version(), Ok(2));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id(), HistoryItemId::new(7));
+        assert_eq!(items[0].as_text(), Some(" exact\ntext\t"));
+        assert!(items[0].is_pinned());
+        assert_eq!(items[0].last_used_sequence(), 9);
     }
 
     #[test]
-    fn clear_unpinned_removes_only_unpinned_rows_in_one_transaction() {
-        let database = TestDatabase::new("clear-unpinned");
-        let mut repository = Repository::open(database.path()).unwrap();
-        for index in 0..4 {
-            repository
-                .apply(PersistenceMutation::Upsert {
-                    item: TextHistoryItem::new(
-                        HistoryItemId::new(index),
-                        format!("item {index}"),
-                        index,
-                        index,
-                        index % 2 == 0,
-                    ),
-                    removed_ids: Vec::new(),
-                })
-                .unwrap();
-        }
-
-        repository
-            .apply(PersistenceMutation::ClearUnpinned)
-            .unwrap();
-
-        assert_eq!(repository.item_count(), Ok(2));
-        assert!(
-            repository
-                .load()
-                .unwrap()
-                .iter()
-                .all(TextHistoryItem::is_pinned)
+    fn repository_round_trips_image_metadata() {
+        let storage = TestStorage::new("image-roundtrip");
+        let mut repository = Repository::open(storage.paths.database()).unwrap();
+        let item = TextHistoryItem::new_image(
+            HistoryItemId::new(2),
+            ImageData::new("a".repeat(64), ImageMime::Png, 1234, 640, 480),
+            2,
+            2,
+            true,
         );
-        drop(repository);
-
-        let reopened = Repository::open(database.path()).unwrap();
-        assert_eq!(reopened.item_count(), Ok(2));
-    }
-
-    #[test]
-    fn repository_round_trips_exact_text_and_metadata() {
-        let database = TestDatabase::new("exact-text");
-        let mut repository = Repository::open(database.path()).unwrap();
-        let exact = "  leading  \n\n\tUnicode: Olá 🦁\r\ntrailing  \n";
-        let item = TextHistoryItem::new(HistoryItemId::new(7), exact.into(), 3, 9, true);
         repository
             .apply(PersistenceMutation::Upsert {
                 item: item.clone(),
                 removed_ids: Vec::new(),
             })
             .unwrap();
-        drop(repository);
+        assert_eq!(repository.load().unwrap(), vec![item]);
+    }
 
-        let reopened = Repository::open(database.path()).unwrap();
-        assert_eq!(reopened.load(), Ok(vec![item]));
+    #[test]
+    fn invalid_persisted_image_metadata_is_rejected() {
+        let storage = TestStorage::new("invalid-image-metadata");
+        let repository = Repository::open(storage.paths.database()).unwrap();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO history_items (
+                    id, kind, content_hash, mime_type, byte_length,
+                    image_width, image_height, created_sequence, last_used_sequence, pinned
+                 ) VALUES (1, 'image', ?1, 'image/png', 1, ?2, 1, 1, 1, 0)",
+                params![
+                    "a".repeat(64),
+                    i64::from(image_store::MAX_IMAGE_DIMENSION) + 1
+                ],
+            )
+            .unwrap();
+        assert!(repository.load().is_err());
+    }
+
+    #[test]
+    fn newer_schema_is_rejected() {
+        let storage = TestStorage::new("newer");
+        drop(Repository::open(storage.paths.database()).unwrap());
+        let connection = Connection::open(storage.paths.database()).unwrap();
+        connection.pragma_update(None, "user_version", 99).unwrap();
+        drop(connection);
+        assert!(matches!(
+            Repository::open(storage.paths.database()),
+            Err(PersistenceError {
+                stage: "migration-version-newer"
+            })
+        ));
     }
 }

@@ -165,6 +165,8 @@ human-readable times from them would be fake metadata.
 
 ## Phase 4 — Images and screenshots
 
+**Status: implemented, pending manual validation on the target Zorin GNOME/X11 machine.**
+
 ### Goal
 
 Support visual clipboard history without making the popup heavy.
@@ -189,6 +191,29 @@ Screenshots appear as compact thumbnails mixed into history and can be restored 
 - orphaned blob files are cleaned;
 - limits prevent unbounded disk use;
 - image contents are never logged.
+
+### Result
+
+Text and images now share one typed history/order/retention model. Phase 4 accepts
+PNG and JPEG clipboard payloads, stores exact encoded originals under the private
+LionClip XDG data root using SHA-256 content-addressed names, and stores only
+metadata/references in SQLite schema v2. The v1 → v2 migration preserves existing
+text IDs, exact contents, recency sequences and pin state.
+
+Image processing generates bounded 240×135 thumbnails before list display, so
+opening the popup reads only LionClip-generated thumbnail files rather than
+decoding every original. Capture keeps the existing event sequence guard and does
+validation/thumbnail/blob work off the GTK main path; image restore publishes the
+stored compressed MIME bytes before the popup closes and uses typed self-write
+suppression to avoid recapture.
+
+The default policies are 500 total unpinned history items, 25 MiB maximum encoded
+image size, 16,384 maximum dimension, 50 million maximum pixels and 512 MiB
+aggregate image storage. Oldest eligible unpinned images may be evicted to stay
+under the byte cap; pinned images are never deleted solely to make room for a new
+capture. Delete, clear, retention and startup reconciliation clean unreferenced
+originals/thumbnails. No OCR, perceptual matching, image editing or arbitrary MIME
+history was added.
 
 ---
 
