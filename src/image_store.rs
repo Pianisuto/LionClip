@@ -56,10 +56,6 @@ impl ImageStoreError {
 #[derive(Clone, Debug)]
 pub struct StoredImage {
     pub image: ImageData,
-    /// True only when this capture created the content-addressed original.
-    /// It lets stale clipboard work remove its own orphan without touching a
-    /// blob that was already referenced by history.
-    pub original_created: bool,
 }
 
 pub fn process_and_store(
@@ -91,10 +87,7 @@ pub fn process_and_store(
         return Err(error);
     }
 
-    Ok(StoredImage {
-        image,
-        original_created,
-    })
+    Ok(StoredImage { image })
 }
 
 pub fn blob_path(paths: &StoragePaths, image: &ImageData) -> Option<PathBuf> {
@@ -399,7 +392,6 @@ mod tests {
         let original = blob_path(&storage.paths, &first.image).unwrap();
         let thumbnail = thumbnail_path(&storage.paths, &first.image).unwrap();
 
-        assert!(first.original_created);
         assert!(original.is_file());
         assert!(thumbnail.is_file());
         assert_eq!(fs::read(&original).unwrap(), bytes);
@@ -430,8 +422,9 @@ mod tests {
         );
 
         let second = process_and_store(&storage.paths, ImageMime::Png, bytes).unwrap();
-        assert!(!second.original_created);
         assert_eq!(second.image.content_hash(), first.image.content_hash());
+        assert_eq!(fs::read_dir(storage.paths.blobs()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(storage.paths.thumbnails()).unwrap().count(), 1);
 
         delete_asset(&storage.paths, &first.image);
         assert!(!original.exists());
