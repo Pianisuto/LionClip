@@ -45,6 +45,34 @@ jobs:
           image_store = Path('src/image_store.rs')
           text = image_store.read_text()
           text = text.replace('gdk_pixbuf::{InterpType, PixbufLoader, prelude::*}', 'gdk_pixbuf::{PixbufLoader, prelude::*}')
+          text = text.replace(
+              '''        assert_eq!(
+              process_and_store(&storage.paths, ImageMime::Png, b"not-a-png".to_vec()),
+              Err(ImageStoreError::InvalidImage)
+          );''',
+              '''        assert!(matches!(
+              process_and_store(&storage.paths, ImageMime::Png, b"not-a-png".to_vec()),
+              Err(ImageStoreError::InvalidImage)
+          ));''',
+          )
+          text = text.replace(
+              '''        assert_eq!(
+              process_and_store(
+                  &storage.paths,
+                  ImageMime::Png,
+                  vec![0; MAX_IMAGE_ENCODED_BYTES + 1]
+              ),
+              Err(ImageStoreError::TooLarge)
+          );''',
+              '''        assert!(matches!(
+              process_and_store(
+                  &storage.paths,
+                  ImageMime::Png,
+                  vec![0; MAX_IMAGE_ENCODED_BYTES + 1]
+              ),
+              Err(ImageStoreError::TooLarge)
+          ));''',
+          )
           image_store.write_text(text)
 
           model = Path('src/history/model.rs')
@@ -83,8 +111,16 @@ jobs:
           repository = Path('src/history/repository.rs')
           text = repository.read_text()
           text = text.replace(
-              '''        assert_eq!(\n            Repository::open(storage.paths.database()),\n            Err(PersistenceError::at("migration-version-newer"))\n        );''',
-              '''        assert!(matches!(\n            Repository::open(storage.paths.database()),\n            Err(PersistenceError {\n                stage: "migration-version-newer"\n            })\n        ));''',
+              '''        assert_eq!(
+              Repository::open(storage.paths.database()),
+              Err(PersistenceError::at("migration-version-newer"))
+          );''',
+              '''        assert!(matches!(
+              Repository::open(storage.paths.database()),
+              Err(PersistenceError {
+                  stage: "migration-version-newer"
+              })
+          ));''',
           )
           repository.write_text(text)
           PY
