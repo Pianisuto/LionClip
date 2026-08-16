@@ -271,8 +271,23 @@ fn write_atomic_if_missing(path: &Path, bytes: &[u8]) -> Result<bool, ImageStore
         file.write_all(bytes).map_err(|_| ImageStoreError::Write)?;
         file.sync_all().map_err(|_| ImageStoreError::Write)?;
         drop(file);
-        fs::rename(&temp, path).map_err(|_| ImageStoreError::Write)?;
-        Ok(true)
+
+        // Publish without replacing an already-accepted blob. Using a
+        // same-directory hard link gives us atomic no-clobber semantics
+        // on the normal Linux filesystems used for XDG data. A racing
+        // identical capture reuses the winner instead of both callers
+        // believing they created the final path.
+        match fs::hard_link(&temp, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&temp);
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&temp);
+                Ok(false)
+            }
+            Err(_) => Err(ImageStoreError::Write),
+        }
     })();
 
     if result.is_err() {
@@ -450,6 +465,27 @@ mod tests {
         let missing = reconcile(&storage.paths, std::slice::from_ref(&item)).unwrap();
         assert_eq!(missing, vec![item.id()]);
         assert!(!thumbnail.exists());
+    }
+
+    #[test]
+    fn jpeg_payload_is_supported_and_keeps_jpg_original() {
+        let storage = TestStorage::new("jpeg");
+        let pixbuf = Pixbuf::new(Colorspace::Rgb, false, 8, 320, 200).unwrap();
+        pixbuf.fill(0x996633ff);
+        let bytes = pixbuf
+            .save_to_bufferv("jpeg", &["quality"], &["90"])
+            .unwrap();
+        let stored = process_and_store(&storage.paths, ImageMime::Jpeg, bytes.clone()).unwrap();
+        let original = blob_path(&storage.paths, &stored.image).unwrap();
+
+        assert_eq!(stored.image.mime_type(), ImageMime::Jpeg);
+        assert_eq!(stored.image.width(), 320);
+        assert_eq!(stored.image.height(), 200);
+        assert_eq!(
+            original.extension().and_then(|value| value.to_str()),
+            Some("jpg")
+        );
+        assert_eq!(fs::read(original).unwrap(), bytes);
     }
 
     #[test]
