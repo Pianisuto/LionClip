@@ -2,6 +2,7 @@ use gdk4_x11::X11Surface;
 use gtk::prelude::*;
 use x11rb::{
     connection::Connection,
+    properties::{WmSizeHints, WmSizeHintsSpecification},
     protocol::{
         randr::ConnectionExt as _,
         xproto::{ConfigureWindowAux, ConnectionExt as _},
@@ -80,6 +81,7 @@ pub fn place_near_pointer(
     };
     let origin = clamp_popup_origin(desired, popup_size, monitor, MONITOR_MARGIN);
 
+    announce_position(&connection, xid, origin)?;
     connection
         .configure_window(xid, &ConfigureWindowAux::new().x(origin.x).y(origin.y))
         .map_err(|_| PositionError::Placement)?
@@ -93,6 +95,32 @@ pub fn place_near_pointer(
         monitor,
         status,
     })
+}
+
+/// Records the placement as a user-specified position in `WM_NORMAL_HINTS`.
+///
+/// A window manager places a window it has not managed yet by its own policy
+/// and ignores the coordinates the client set before mapping. Announcing the
+/// position as user-specified makes it honour the placement instead, so the
+/// popup is mapped where it belongs rather than moved there afterwards. The
+/// existing hints are read back first so GTK's own size constraints survive.
+fn announce_position<C: Connection>(
+    connection: &C,
+    window: u32,
+    origin: Point,
+) -> Result<(), PositionError> {
+    let mut hints = WmSizeHints::get_normal_hints(connection, window)
+        .map_err(|_| PositionError::Placement)?
+        .reply()
+        .map_err(|_| PositionError::Placement)?
+        .unwrap_or_default();
+    hints.position = Some((WmSizeHintsSpecification::UserSpecified, origin.x, origin.y));
+    hints
+        .set_normal_hints(connection, window)
+        .map_err(|_| PositionError::Placement)?
+        .check()
+        .map_err(|_| PositionError::Placement)?;
+    Ok(())
 }
 
 fn query_monitors<C: Connection>(connection: &C, root: u32) -> Option<Vec<Rect>> {

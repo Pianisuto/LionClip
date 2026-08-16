@@ -285,15 +285,22 @@ impl HistoryPopup {
         self.state.rebuild(selected, index);
     }
 
-    /// Resets the transient search state and shows the popup with the newest
-    /// item selected. Persistent history state is never reset here.
-    pub fn present(&self) {
+    /// Resets the transient search state and renders the current history with
+    /// the newest item selected, before the window is shown. Persistent history
+    /// state is never reset here.
+    ///
+    /// Separate from [`Self::present`] so the caller can place the window while
+    /// it still holds its final content but is not on screen yet.
+    pub fn prepare(&self) {
         // Opening always starts from a known state, so suppression can never
         // stay stuck from an earlier menu or dialog.
         self.state.suppression_depth.set(0);
         self.state.deferred_hide_check.set(false);
         self.state.set_search_text_silently("");
         self.state.rebuild(None, 0);
+    }
+
+    pub fn present(&self) {
         self.window.present();
         self.state.focus_search();
     }

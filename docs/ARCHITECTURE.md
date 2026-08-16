@@ -348,13 +348,25 @@ trait PopupPositioner {
 
 The final API should follow what GTK/GDK actually permits; do not force this exact signature.
 
-### Reveal on open
+### Placing before the window is mapped
 
-The X11 backend can only place the popup once its surface exists, which is after
-the compositor has already mapped it somewhere. The window is therefore
-presented fully transparent and revealed on the first frame, once placement has
-been applied, so it never appears at the compositor's position first. Placement,
-clamping and the fallback path are unchanged.
+The popup must never be seen anywhere but at the pointer, so opening it places
+the window before the compositor maps it:
+
+1. the content is rendered first, so the placement measures the real popup;
+2. the window is realized, which creates its surface without mapping it, and
+   placed while it is still off screen — an already-open-once popup would
+   otherwise be mapped at its previous position;
+3. the placement is also written to `WM_NORMAL_HINTS` as a user-specified
+   position, because a window manager places a window it has not managed yet by
+   its own policy and ignores coordinates set before the first map;
+4. the window is presented fully transparent and revealed on the first frame,
+   after a second, authoritative placement that runs with the final mapped
+   size.
+
+Steps 2 and 3 remove the visible jump; step 4 covers whatever the compositor
+does in between. Placement maths, clamping, monitor selection and the fallback
+path are unchanged.
 
 ### Phase 0 result
 

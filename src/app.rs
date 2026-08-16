@@ -110,14 +110,24 @@ impl AppState {
     }
 
     fn show_popup(&self) {
-        if !self.popup.window.is_visible() {
-            // The popup can only be placed once its surface exists, so it is
-            // presented fully transparent and revealed on the first frame,
-            // after placement has been applied. Without this the first frame is
-            // visible wherever the compositor put the window and the popup
-            // appears to jump to the pointer.
-            self.popup.window.set_opacity(0.0);
+        // Render the final content first, so both placements below measure the
+        // popup the user is about to see.
+        self.popup.prepare();
 
+        if !self.popup.window.is_visible() {
+            // Nothing may be visible before the popup sits at the pointer, and
+            // the window keeps the frame it was hidden with, so hide the
+            // content and place the surface while it is still unmapped.
+            self.popup.window.set_opacity(0.0);
+            // Realizing first gives even the very first open a surface to
+            // place before it is mapped.
+            gtk::prelude::WidgetExt::realize(&self.popup.window);
+            let _ = self.positioner.place(&self.popup.window);
+
+            // The surface may not exist yet on the very first open, and its
+            // size is only final once mapped, so place again on the first
+            // frame. That placement is the authoritative one, and revealing
+            // after it means neither placement is ever seen happening.
             let positioner = self.positioner.clone();
             self.popup.window.add_tick_callback(move |window, _| {
                 let outcome = positioner.place(window);
