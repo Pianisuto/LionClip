@@ -101,10 +101,7 @@ impl AppState {
                 let history = history.clone();
 
                 move |id| {
-                    let payload = history
-                        .borrow()
-                        .item(id)
-                        .map(|item| item.payload().clone());
+                    let payload = history.borrow().item(id).map(|item| item.payload().clone());
                     match payload {
                         Some(HistoryPayload::Text(text)) => writer.restore_text(&text),
                         Some(HistoryPayload::Image(image)) => writer.restore_image(&image),
