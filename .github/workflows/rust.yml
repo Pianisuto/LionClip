@@ -35,43 +35,120 @@ jobs:
         with:
           components: clippy,rustfmt
 
-      - name: Apply Phase 4 mechanical fixes
+      - name: Finalize Phase 4 source hardening
         if: github.event_name == 'pull_request' && github.head_ref == 'gpt/issue-5-phase-4'
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          image_store = Path('src/image_store.rs')
-          text = image_store.read_text()
-          text = re.sub(
-              r'''assert_eq!\(\s*process_and_store\(&storage\.paths,\s*ImageMime::Png,\s*b"not-a-png"\.to_vec\(\)\),\s*Err\(ImageStoreError::InvalidImage\)\s*\);''',
-              '''assert!(matches!(
-                  process_and_store(&storage.paths, ImageMime::Png, b"not-a-png".to_vec()),
-                  Err(ImageStoreError::InvalidImage)
-              ));''',
-              text,
-          )
-          text = re.sub(
-              r'''assert_eq!\(\s*process_and_store\(\s*&storage\.paths,\s*ImageMime::Png,\s*vec!\[0; MAX_IMAGE_ENCODED_BYTES \+ 1\]\s*\),\s*Err\(ImageStoreError::TooLarge\)\s*\);''',
-              '''assert!(matches!(
-                  process_and_store(
-                      &storage.paths,
-                      ImageMime::Png,
-                      vec![0; MAX_IMAGE_ENCODED_BYTES + 1]
-                  ),
-                  Err(ImageStoreError::TooLarge)
-              ));''',
-              text,
-          )
-          image_store.write_text(text)
+          path = Path('src/image_store.rs')
+          text = path.read_text()
+          old = '''fn write_atomic_if_missing(path: &Path, bytes: &[u8]) -> Result<bool, ImageStoreError> {
+              if path.is_file() {
+                  return Ok(false);
+              }
+              let parent = path.parent().ok_or(ImageStoreError::Directory)?;
+              ensure_private_directory(parent)?;
+
+              let suffix = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+              let temp = parent.join(format!(".lionclip-{}-{suffix}.tmp", std::process::id()));
+              let result = (|| {
+                  let mut file = OpenOptions::new()
+                      .create_new(true)
+                      .write(true)
+                      .mode(0o600)
+                      .open(&temp)
+                      .map_err(|_| ImageStoreError::Write)?;
+                  file.write_all(bytes).map_err(|_| ImageStoreError::Write)?;
+                  file.sync_all().map_err(|_| ImageStoreError::Write)?;
+                  drop(file);
+                  fs::rename(&temp, path).map_err(|_| ImageStoreError::Write)?;
+                  Ok(true)
+              })();
+
+              if result.is_err() {
+                  let _ = fs::remove_file(&temp);
+              }
+              result
+          }'''
+          new = '''fn write_atomic_if_missing(path: &Path, bytes: &[u8]) -> Result<bool, ImageStoreError> {
+              if path.is_file() {
+                  return Ok(false);
+              }
+              let parent = path.parent().ok_or(ImageStoreError::Directory)?;
+              ensure_private_directory(parent)?;
+
+              let suffix = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+              let temp = parent.join(format!(".lionclip-{}-{suffix}.tmp", std::process::id()));
+              let result = (|| {
+                  let mut file = OpenOptions::new()
+                      .create_new(true)
+                      .write(true)
+                      .mode(0o600)
+                      .open(&temp)
+                      .map_err(|_| ImageStoreError::Write)?;
+                  file.write_all(bytes).map_err(|_| ImageStoreError::Write)?;
+                  file.sync_all().map_err(|_| ImageStoreError::Write)?;
+                  drop(file);
+
+                  // Publish without replacing an already-accepted blob. Using a
+                  // same-directory hard link gives us atomic no-clobber semantics
+                  // on the normal Linux filesystems used for XDG data. A racing
+                  // identical capture reuses the winner instead of both callers
+                  // believing they created the final path.
+                  match fs::hard_link(&temp, path) {
+                      Ok(()) => {
+                          let _ = fs::remove_file(&temp);
+                          Ok(true)
+                      }
+                      Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                          let _ = fs::remove_file(&temp);
+                          Ok(false)
+                      }
+                      Err(_) => Err(ImageStoreError::Write),
+                  }
+              })();
+
+              if result.is_err() {
+                  let _ = fs::remove_file(&temp);
+              }
+              result
+          }'''
+          if old not in text:
+              raise SystemExit('write_atomic_if_missing source did not match expected green baseline')
+          text = text.replace(old, new)
+
+          marker = '''    #[test]
+              fn malformed_and_oversized_payloads_are_rejected_without_files() {'''
+          jpeg_test = '''    #[test]
+              fn jpeg_payload_is_supported_and_keeps_jpg_original() {
+                  let storage = TestStorage::new("jpeg");
+                  let pixbuf = Pixbuf::new(Colorspace::Rgb, false, 8, 320, 200).unwrap();
+                  pixbuf.fill(0x996633ff);
+                  let bytes = pixbuf.save_to_bufferv("jpeg", &["quality"], &["90"]).unwrap();
+                  let stored = process_and_store(&storage.paths, ImageMime::Jpeg, bytes.clone()).unwrap();
+                  let original = blob_path(&storage.paths, &stored.image).unwrap();
+
+                  assert_eq!(stored.image.mime_type(), ImageMime::Jpeg);
+                  assert_eq!(stored.image.width(), 320);
+                  assert_eq!(stored.image.height(), 200);
+                  assert_eq!(original.extension().and_then(|value| value.to_str()), Some("jpg"));
+                  assert_eq!(fs::read(original).unwrap(), bytes);
+              }
+
+          '''
+          if 'fn jpeg_payload_is_supported_and_keeps_jpg_original()' not in text:
+              if marker not in text:
+                  raise SystemExit('jpeg test insertion marker missing')
+              text = text.replace(marker, jpeg_test + marker)
+          path.write_text(text)
           PY
           cargo fmt
           if ! git diff --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add src
-            git commit -m 'style: finalize Phase 4 sources'
+            git add src/image_store.rs
+            git commit -m 'fix: harden concurrent image blob publication'
             git push origin HEAD:${GITHUB_HEAD_REF}
           fi
 
