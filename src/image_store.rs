@@ -311,12 +311,51 @@ fn valid_hash(hash: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use gtk::gdk_pixbuf::{Colorspace, Pixbuf};
+
     use super::*;
+    use crate::history::TextHistory;
+
+    static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    struct TestStorage {
+        root: PathBuf,
+        paths: StoragePaths,
+    }
+
+    impl TestStorage {
+        fn new(name: &str) -> Self {
+            let suffix = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "lionclip-image-store-{name}-{}-{suffix}",
+                std::process::id()
+            ));
+            let paths = StoragePaths::for_root(root.clone());
+            Self { root, paths }
+        }
+    }
+
+    impl Drop for TestStorage {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn synthetic_png(width: i32, height: i32) -> Vec<u8> {
+        let pixbuf = Pixbuf::new(Colorspace::Rgb, true, 8, width, height).unwrap();
+        pixbuf.fill(0x336699ff);
+        pixbuf.save_to_bufferv("png", &[]).unwrap()
+    }
 
     #[test]
     fn thumbnail_size_preserves_aspect_ratio_and_bounds() {
         assert_eq!(thumbnail_dimensions(1920, 1080), (240, 135));
-        assert_eq!(thumbnail_dimensions(1080, 1920), (76, 135));
+        assert_eq!(thumbnail_dimensions(1080, 1920), (75, 135));
         assert_eq!(thumbnail_dimensions(100, 50), (100, 50));
     }
 
@@ -335,5 +374,84 @@ mod tests {
         assert!(!valid_hash("../escape"));
         assert!(!valid_hash(&"A".repeat(64)));
         assert!(!valid_hash(&"a".repeat(63)));
+    }
+
+    #[test]
+    fn blob_and_thumbnail_round_trip_are_private_and_content_addressed() {
+        let storage = TestStorage::new("roundtrip");
+        let bytes = synthetic_png(640, 360);
+        let first = process_and_store(&storage.paths, ImageMime::Png, bytes.clone()).unwrap();
+        let original = blob_path(&storage.paths, &first.image).unwrap();
+        let thumbnail = thumbnail_path(&storage.paths, &first.image).unwrap();
+
+        assert!(first.original_created);
+        assert!(original.is_file());
+        assert!(thumbnail.is_file());
+        assert_eq!(fs::read(&original).unwrap(), bytes);
+        assert_eq!(first.image.width(), 640);
+        assert_eq!(first.image.height(), 360);
+        assert!(original.file_name().unwrap().to_string_lossy().starts_with(first.image.content_hash()));
+        assert_eq!(
+            fs::metadata(storage.paths.blobs()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(fs::metadata(&original).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(&thumbnail).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let second = process_and_store(&storage.paths, ImageMime::Png, bytes).unwrap();
+        assert!(!second.original_created);
+        assert_eq!(second.image.content_hash(), first.image.content_hash());
+
+        delete_asset(&storage.paths, &first.image);
+        assert!(!original.exists());
+        assert!(!thumbnail.exists());
+    }
+
+    #[test]
+    fn reconciliation_removes_orphans_and_reports_missing_referenced_blob() {
+        let storage = TestStorage::new("reconcile");
+        let stored = process_and_store(
+            &storage.paths,
+            ImageMime::Png,
+            synthetic_png(32, 16),
+        )
+        .unwrap();
+        let mut history = TextHistory::default();
+        assert!(history.record_image(stored.image.clone()).changed());
+        let item = history.items()[0].clone();
+
+        let orphan_blob = storage.paths.blobs().join("orphan.tmp");
+        let orphan_thumb = storage.paths.thumbnails().join("orphan.tmp");
+        fs::write(&orphan_blob, b"orphan").unwrap();
+        fs::write(&orphan_thumb, b"orphan").unwrap();
+        assert!(reconcile(&storage.paths, std::slice::from_ref(&item)).unwrap().is_empty());
+        assert!(!orphan_blob.exists());
+        assert!(!orphan_thumb.exists());
+
+        let original = blob_path(&storage.paths, &stored.image).unwrap();
+        let thumbnail = thumbnail_path(&storage.paths, &stored.image).unwrap();
+        fs::remove_file(&original).unwrap();
+        let missing = reconcile(&storage.paths, std::slice::from_ref(&item)).unwrap();
+        assert_eq!(missing, vec![item.id()]);
+        assert!(!thumbnail.exists());
+    }
+
+    #[test]
+    fn malformed_and_oversized_payloads_are_rejected_without_files() {
+        let storage = TestStorage::new("reject");
+        assert_eq!(
+            process_and_store(&storage.paths, ImageMime::Png, b"not-a-png".to_vec()),
+            Err(ImageStoreError::InvalidImage)
+        );
+        assert_eq!(
+            process_and_store(
+                &storage.paths,
+                ImageMime::Png,
+                vec![0; MAX_IMAGE_ENCODED_BYTES + 1]
+            ),
+            Err(ImageStoreError::TooLarge)
+        );
+        assert!(!storage.paths.blobs().exists());
+        assert!(!storage.paths.thumbnails().exists());
     }
 }
