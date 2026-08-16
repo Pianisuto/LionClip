@@ -555,18 +555,18 @@ impl PopupState {
 
         let focused = actions.iter().position(|action| self.focus_within(action));
         match (focused, forward) {
-            (None, true) => actions[0].grab_focus(),
-            (Some(current), true) => actions[(current + 1).min(actions.len() - 1)].grab_focus(),
+            (None, true) => self.grab_focus_visibly(&actions[0]),
+            (Some(current), true) => {
+                self.grab_focus_visibly(&actions[(current + 1).min(actions.len() - 1)]);
+            }
             (Some(0), false) => {
                 if let Some(row) = self.row_at(index) {
-                    row.grab_focus()
-                } else {
-                    false
+                    self.grab_focus_visibly(&row);
                 }
             }
-            (Some(current), false) => actions[current - 1].grab_focus(),
-            (None, false) => return,
-        };
+            (Some(current), false) => self.grab_focus_visibly(&actions[current - 1]),
+            (None, false) => {}
+        }
     }
 
     fn move_selection(&self, delta: i32) {
@@ -732,13 +732,24 @@ impl PopupState {
     }
 
     fn focus_search(&self) {
-        self.search.grab_focus();
+        self.grab_focus_visibly(&self.search);
+    }
+
+    /// Moves the focus and tells the window the move came from the keyboard.
+    ///
+    /// The theme only draws a focus ring while the window's focus-visible flag
+    /// is set, and GTK sets it for the key navigation it handles itself. The
+    /// popup handles its own arrows, so it has to say so, otherwise focus lands
+    /// on a row action with nothing to show for it.
+    fn grab_focus_visibly(&self, widget: &impl IsA<gtk::Widget>) {
+        widget.grab_focus();
+        self.window.set_focus_visible(true);
     }
 
     fn focus_row(&self, index: usize) {
         if let Some(row) = self.row_at(index) {
             self.list.select_row(Some(&row));
-            row.grab_focus();
+            self.grab_focus_visibly(&row);
         }
     }
 
