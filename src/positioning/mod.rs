@@ -73,6 +73,15 @@ impl SessionDiagnostics {
     }
 }
 
+/// Pointer sample a placement was computed from.
+///
+/// The popup is placed twice while opening, and the pointer keeps moving in
+/// between. Reusing the first sample for the second placement keeps both
+/// results identical, so the popup cannot appear to jump towards a pointer that
+/// has already moved on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerAnchor(geometry::Point);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlacementOutcome {
     X11Pointer {
@@ -80,6 +89,7 @@ pub enum PlacementOutcome {
         y: i32,
         monitor: geometry::Rect,
         status: X11PathStatus,
+        anchor: PointerAnchor,
     },
     CompositorFallback {
         reason: String,
@@ -87,6 +97,14 @@ pub enum PlacementOutcome {
 }
 
 impl PlacementOutcome {
+    /// The pointer sample this placement used, when there was one.
+    pub fn anchor(&self) -> Option<PointerAnchor> {
+        match self {
+            Self::X11Pointer { anchor, .. } => Some(*anchor),
+            Self::CompositorFallback { .. } => None,
+        }
+    }
+
     pub fn log_line(&self) -> String {
         match self {
             Self::X11Pointer {
@@ -94,6 +112,7 @@ impl PlacementOutcome {
                 y,
                 monitor,
                 status,
+                ..
             } => format!(
                 "lionclip: placement backend=x11-pointer status={} result=placed x={x} y={y} monitor={}x{}+{}+{}",
                 status.label(),
@@ -123,15 +142,19 @@ impl Positioner {
         }
     }
 
-    pub fn place(&self, window: &adw::ApplicationWindow) -> PlacementOutcome {
+    /// Places the popup near the pointer. Pass the anchor of an earlier
+    /// placement of the same popup to reuse that pointer sample instead of
+    /// taking a new one.
+    pub fn place(
+        &self,
+        window: &adw::ApplicationWindow,
+        anchor: Option<PointerAnchor>,
+    ) -> PlacementOutcome {
         match self.backend {
-            DisplayBackend::X11 => {
-                x11::place_near_pointer(window, self.x11_status).unwrap_or_else(|error| {
-                    PlacementOutcome::CompositorFallback {
-                        reason: sanitize_reason(&error),
-                    }
-                })
-            }
+            DisplayBackend::X11 => x11::place_near_pointer(window, self.x11_status, anchor)
+                .unwrap_or_else(|error| PlacementOutcome::CompositorFallback {
+                    reason: sanitize_reason(&error),
+                }),
             DisplayBackend::Wayland => PlacementOutcome::CompositorFallback {
                 reason: "wayland-does-not-allow-absolute-toplevel-placement".into(),
             },
@@ -231,6 +254,7 @@ mod tests {
                 height: 1080,
             },
             status,
+            anchor: PointerAnchor(geometry::Point { x: 84, y: 184 }),
         };
 
         assert!(

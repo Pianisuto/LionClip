@@ -288,10 +288,12 @@ selection or focus by a small stylesheet with no hardcoded colors.
 
 The rounded surface is the content box, not the toplevel: it carries Adwaita's
 own `.background` style plus a corner radius and clips its children. The
-toplevel background is explicitly transparent, which is what makes the corners
-work — GTK marks the whole surface opaque whenever the window background is
-opaque, and the compositor then skips blending and leaves black behind the
-rounded corners.
+toplevel draws nothing — background, border and shadow are all cleared — and
+both of those matter. GTK marks the whole surface opaque whenever the window
+background is opaque, and the compositor then skips blending and leaves black
+behind the rounded corners; a themed window shadow survives a transparent
+background and keeps painting a faint halo into the corner area, which reads as
+a dim rectangle under the popup.
 
 ### Interaction
 
@@ -363,6 +365,12 @@ the window before the compositor maps it:
 4. the window is presented fully transparent and revealed on the first frame,
    after a second, authoritative placement that runs with the final mapped
    size.
+
+The second placement reuses the pointer sample of the first one, so a pointer
+that keeps moving while the popup opens cannot pull it to a second position.
+Placement also runs on its own X connection, so the display is synchronised
+first: a pending unmap from a previous open could otherwise be processed after
+the move and leave the popup at its old position.
 
 Steps 2 and 3 remove the visible jump; step 4 covers whatever the compositor
 does in between. Placement maths, clamping, monitor selection and the fallback

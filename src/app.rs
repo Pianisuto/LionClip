@@ -122,15 +122,22 @@ impl AppState {
             // Realizing first gives even the very first open a surface to
             // place before it is mapped.
             gtk::prelude::WidgetExt::realize(&self.popup.window);
-            let _ = self.positioner.place(&self.popup.window);
+            // Placement runs on its own X connection, so a still-pending unmap
+            // from a previous open could otherwise be processed after this
+            // move and leave the popup at its old position.
+            if let Some(display) = gdk::Display::default() {
+                display.sync();
+            }
+            let anchor = self.positioner.place(&self.popup.window, None).anchor();
 
             // The surface may not exist yet on the very first open, and its
             // size is only final once mapped, so place again on the first
-            // frame. That placement is the authoritative one, and revealing
-            // after it means neither placement is ever seen happening.
+            // frame. That placement is the authoritative one; it reuses the
+            // pointer sample above, because the pointer may have moved on and
+            // the popup must not chase it once opened.
             let positioner = self.positioner.clone();
             self.popup.window.add_tick_callback(move |window, _| {
-                let outcome = positioner.place(window);
+                let outcome = positioner.place(window, anchor);
                 println!("{}", outcome.log_line());
                 window.set_opacity(1.0);
                 glib::ControlFlow::Break

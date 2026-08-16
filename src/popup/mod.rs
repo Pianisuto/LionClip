@@ -17,12 +17,18 @@ const LIST_MAX_HEIGHT: i32 = 360;
 /// Keeps the popup a single rounded surface and reveals row actions on hover,
 /// selection or keyboard focus. No color is named here: the rounded surface
 /// carries Adwaita's own `.background` style, so light and dark both follow the
-/// system theme. The transparent toplevel matters beyond looks — GTK marks the
-/// whole surface opaque when the window background is opaque, which makes the
-/// compositor skip blending and paint black behind the rounded corners.
+/// system theme.
+///
+/// The toplevel rules matter beyond looks. GTK marks the whole surface opaque
+/// when the window background is opaque, which makes the compositor skip
+/// blending and paint black behind the rounded corners; and a themed window
+/// shadow keeps painting a faint halo into those corners, which reads as a dim
+/// rectangle under the popup, so the toplevel draws nothing at all.
 const POPUP_CSS: &str = "\
 window.lionclip-popup {
   background-color: transparent;
+  box-shadow: none;
+  border: none;
 }
 
 .lionclip-surface {

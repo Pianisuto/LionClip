@@ -10,7 +10,7 @@ use x11rb::{
 };
 
 use super::{
-    PlacementOutcome, X11PathStatus,
+    PlacementOutcome, PointerAnchor, X11PathStatus,
     geometry::{Point, Rect, Size, clamp_popup_origin, monitor_at_pointer},
 };
 
@@ -28,6 +28,7 @@ pub enum PositionError {
 pub fn place_near_pointer(
     window: &adw::ApplicationWindow,
     status: X11PathStatus,
+    anchor: Option<PointerAnchor>,
 ) -> Result<PlacementOutcome, PositionError> {
     let surface = window
         .surface()
@@ -46,14 +47,19 @@ pub fn place_near_pointer(
         .get(screen_number)
         .ok_or(PositionError::Query)?;
 
-    let pointer_reply = connection
-        .query_pointer(screen.root)
-        .map_err(|_| PositionError::Query)?
-        .reply()
-        .map_err(|_| PositionError::Query)?;
-    let pointer = Point {
-        x: i32::from(pointer_reply.root_x),
-        y: i32::from(pointer_reply.root_y),
+    let pointer = match anchor {
+        Some(PointerAnchor(pointer)) => pointer,
+        None => {
+            let pointer_reply = connection
+                .query_pointer(screen.root)
+                .map_err(|_| PositionError::Query)?
+                .reply()
+                .map_err(|_| PositionError::Query)?;
+            Point {
+                x: i32::from(pointer_reply.root_x),
+                y: i32::from(pointer_reply.root_y),
+            }
+        }
     };
 
     let window_geometry = connection
@@ -94,6 +100,7 @@ pub fn place_near_pointer(
         y: origin.y,
         monitor,
         status,
+        anchor: PointerAnchor(pointer),
     })
 }
 
