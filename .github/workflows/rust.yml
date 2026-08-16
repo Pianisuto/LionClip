@@ -35,120 +35,73 @@ jobs:
         with:
           components: clippy,rustfmt
 
-      - name: Finalize Phase 4 source hardening
+      - name: Finalize Phase 4 restore semantics
         if: github.event_name == 'pull_request' && github.head_ref == 'gpt/issue-5-phase-4'
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('src/image_store.rs')
-          text = path.read_text()
-          old = '''fn write_atomic_if_missing(path: &Path, bytes: &[u8]) -> Result<bool, ImageStoreError> {
-              if path.is_file() {
-                  return Ok(false);
-              }
-              let parent = path.parent().ok_or(ImageStoreError::Directory)?;
-              ensure_private_directory(parent)?;
+          image_store = Path('src/image_store.rs')
+          text = image_store.read_text()
+          text = text.replace(
+              '.save_to_bufferv("jpeg", &["quality"], &["90"])',
+              '.save_to_bufferv("jpeg", &[("quality", "90")])',
+          )
+          image_store.write_text(text)
 
-              let suffix = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-              let temp = parent.join(format!(".lionclip-{}-{suffix}.tmp", std::process::id()));
-              let result = (|| {
-                  let mut file = OpenOptions::new()
-                      .create_new(true)
-                      .write(true)
-                      .mode(0o600)
-                      .open(&temp)
-                      .map_err(|_| ImageStoreError::Write)?;
-                  file.write_all(bytes).map_err(|_| ImageStoreError::Write)?;
-                  file.sync_all().map_err(|_| ImageStoreError::Write)?;
-                  drop(file);
-                  fs::rename(&temp, path).map_err(|_| ImageStoreError::Write)?;
-                  Ok(true)
-              })();
+          service = Path('src/clipboard/service.rs')
+          text = service.read_text()
+          old = '''        let clipboard = self.clipboard.clone();
+              let suppression = self.suppression.clone();
+              let content_hash = image.content_hash().to_owned();
+              let mime_type = image.mime_type();
 
-              if result.is_err() {
-                  let _ = fs::remove_file(&temp);
-              }
-              result
-          }'''
-          new = '''fn write_atomic_if_missing(path: &Path, bytes: &[u8]) -> Result<bool, ImageStoreError> {
-              if path.is_file() {
-                  return Ok(false);
-              }
-              let parent = path.parent().ok_or(ImageStoreError::Directory)?;
-              ensure_private_directory(parent)?;
-
-              let suffix = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-              let temp = parent.join(format!(".lionclip-{}-{suffix}.tmp", std::process::id()));
-              let result = (|| {
-                  let mut file = OpenOptions::new()
-                      .create_new(true)
-                      .write(true)
-                      .mode(0o600)
-                      .open(&temp)
-                      .map_err(|_| ImageStoreError::Write)?;
-                  file.write_all(bytes).map_err(|_| ImageStoreError::Write)?;
-                  file.sync_all().map_err(|_| ImageStoreError::Write)?;
-                  drop(file);
-
-                  // Publish without replacing an already-accepted blob. Using a
-                  // same-directory hard link gives us atomic no-clobber semantics
-                  // on the normal Linux filesystems used for XDG data. A racing
-                  // identical capture reuses the winner instead of both callers
-                  // believing they created the final path.
-                  match fs::hard_link(&temp, path) {
-                      Ok(()) => {
-                          let _ = fs::remove_file(&temp);
-                          Ok(true)
+              glib::MainContext::default().spawn_local(async move {
+                  let bytes = match gio::spawn_blocking(move || fs::read(path)).await {
+                      Ok(Ok(bytes)) => bytes,
+                      Ok(Err(_)) | Err(_) => {
+                          eprintln!("lionclip: image restore failed stage=blob-read");
+                          return;
                       }
-                      Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                          let _ = fs::remove_file(&temp);
-                          Ok(false)
-                      }
-                      Err(_) => Err(ImageStoreError::Write),
+                  };
+                  let bytes = glib::Bytes::from_owned(bytes);
+                  let provider = gdk::ContentProvider::for_bytes(mime_type.as_str(), &bytes);
+                  suppression.borrow_mut().arm_image(&content_hash);
+                  if clipboard.set_content(Some(&provider)).is_err() {
+                      suppression.borrow_mut().cancel();
+                      eprintln!("lionclip: image restore failed stage=clipboard-set");
                   }
-              })();
-
-              if result.is_err() {
-                  let _ = fs::remove_file(&temp);
-              }
-              result
-          }'''
+              });'''
+          new = '''        // Restoration must complete before the popup closes: otherwise a fast
+              // Ctrl+V can still see the previous clipboard while an async file read is
+              // pending. This reads only the bounded compressed blob (max 25 MiB); it
+              // never decodes full-resolution pixels on the GTK thread.
+              let bytes = match fs::read(path) {
+                  Ok(bytes) => bytes,
+                  Err(_) => {
+                      eprintln!("lionclip: image restore failed stage=blob-read");
+                      return;
+                  }
+              };
+              let bytes = glib::Bytes::from_owned(bytes);
+              let provider = gdk::ContentProvider::for_bytes(image.mime_type().as_str(), &bytes);
+              self.suppression
+                  .borrow_mut()
+                  .arm_image(image.content_hash());
+              if self.clipboard.set_content(Some(&provider)).is_err() {
+                  self.suppression.borrow_mut().cancel();
+                  eprintln!("lionclip: image restore failed stage=clipboard-set");
+              }'''
           if old not in text:
-              raise SystemExit('write_atomic_if_missing source did not match expected green baseline')
-          text = text.replace(old, new)
-
-          marker = '''    #[test]
-              fn malformed_and_oversized_payloads_are_rejected_without_files() {'''
-          jpeg_test = '''    #[test]
-              fn jpeg_payload_is_supported_and_keeps_jpg_original() {
-                  let storage = TestStorage::new("jpeg");
-                  let pixbuf = Pixbuf::new(Colorspace::Rgb, false, 8, 320, 200).unwrap();
-                  pixbuf.fill(0x996633ff);
-                  let bytes = pixbuf.save_to_bufferv("jpeg", &["quality"], &["90"]).unwrap();
-                  let stored = process_and_store(&storage.paths, ImageMime::Jpeg, bytes.clone()).unwrap();
-                  let original = blob_path(&storage.paths, &stored.image).unwrap();
-
-                  assert_eq!(stored.image.mime_type(), ImageMime::Jpeg);
-                  assert_eq!(stored.image.width(), 320);
-                  assert_eq!(stored.image.height(), 200);
-                  assert_eq!(original.extension().and_then(|value| value.to_str()), Some("jpg"));
-                  assert_eq!(fs::read(original).unwrap(), bytes);
-              }
-
-          '''
-          if 'fn jpeg_payload_is_supported_and_keeps_jpg_original()' not in text:
-              if marker not in text:
-                  raise SystemExit('jpeg test insertion marker missing')
-              text = text.replace(marker, jpeg_test + marker)
-          path.write_text(text)
+              raise SystemExit('restore_image source did not match expected baseline')
+          service.write_text(text.replace(old, new))
           PY
           cargo fmt
           if ! git diff --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add src/image_store.rs
-            git commit -m 'fix: harden concurrent image blob publication'
+            git add src/image_store.rs src/clipboard/service.rs
+            git commit -m 'fix: complete image restore before popup closes'
             git push origin HEAD:${GITHUB_HEAD_REF}
           fi
 
