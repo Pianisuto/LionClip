@@ -242,7 +242,10 @@ fn exact_text_survives_worker_shutdown_and_restart() {
     drop(history);
 
     let reopened = TextHistory::persistent(storage.paths.clone()).unwrap();
-    assert_eq!(texts(&reopened), fixtures.into_iter().rev().collect::<Vec<_>>());
+    assert_eq!(
+        texts(&reopened),
+        fixtures.into_iter().rev().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -257,7 +260,12 @@ fn repository_retention_remains_500_after_restart() {
     let reopened = TextHistory::persistent(storage.paths.clone()).unwrap();
     assert_eq!(reopened.items().len(), 500);
     assert_eq!(reopened.items()[0].as_text(), Some("item 500"));
-    assert!(reopened.items().iter().all(|item| item.as_text() != Some("item 0")));
+    assert!(
+        reopened
+            .items()
+            .iter()
+            .all(|item| item.as_text() != Some("item 0"))
+    );
 }
 
 #[test]
