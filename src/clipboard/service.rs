@@ -195,7 +195,14 @@ fn capture_image(
         {
             Ok(value) => value,
             Err(_) => {
-                suppression.borrow_mut().cancel();
+                fallback_to_text(
+                    clipboard,
+                    sequence,
+                    change_sequence,
+                    history,
+                    history_changed,
+                    suppression,
+                );
                 return;
             }
         };
@@ -215,7 +222,14 @@ fn capture_image(
         {
             Ok(value) => value,
             Err((_buffer, _error)) => {
-                suppression.borrow_mut().cancel();
+                fallback_to_text(
+                    clipboard,
+                    sequence,
+                    change_sequence,
+                    history,
+                    history_changed,
+                    suppression,
+                );
                 return;
             }
         };
@@ -223,8 +237,15 @@ fn capture_image(
             return;
         }
         if partial_error.is_some() || read == 0 || read > MAX_IMAGE_ENCODED_BYTES {
-            suppression.borrow_mut().cancel();
             eprintln!("lionclip: image capture rejected reason=encoded-size-or-read");
+            fallback_to_text(
+                clipboard,
+                sequence,
+                change_sequence,
+                history,
+                history_changed,
+                suppression,
+            );
             return;
         }
         bytes.truncate(read);
@@ -237,16 +258,30 @@ fn capture_image(
         {
             Ok(Ok(stored)) => stored,
             Ok(Err(error)) => {
-                suppression.borrow_mut().cancel();
                 eprintln!(
                     "lionclip: image capture rejected reason={}",
                     error.diagnostic()
                 );
+                fallback_to_text(
+                    clipboard,
+                    sequence,
+                    change_sequence,
+                    history,
+                    history_changed,
+                    suppression,
+                );
                 return;
             }
             Err(_) => {
-                suppression.borrow_mut().cancel();
                 eprintln!("lionclip: image capture rejected reason=worker-panic");
+                fallback_to_text(
+                    clipboard,
+                    sequence,
+                    change_sequence,
+                    history,
+                    history_changed,
+                    suppression,
+                );
                 return;
             }
         };
@@ -270,6 +305,27 @@ fn capture_image(
     });
 }
 
+fn fallback_to_text(
+    clipboard: gdk::Clipboard,
+    sequence: u64,
+    change_sequence: Rc<Cell<u64>>,
+    history: Rc<RefCell<TextHistory>>,
+    history_changed: HistoryChangedCallback,
+    suppression: Rc<RefCell<SelfWriteSuppression>>,
+) {
+    if change_sequence.get() != sequence {
+        return;
+    }
+    capture_text(
+        clipboard,
+        sequence,
+        change_sequence,
+        history,
+        history_changed,
+        suppression,
+    );
+}
+
 fn cleanup_new_stale_asset(
     paths: &StoragePaths,
     history: &Rc<RefCell<TextHistory>>,
@@ -284,9 +340,14 @@ fn cleanup_new_stale_asset(
     }
     let paths = paths.clone();
     let image = stored.image.clone();
-    drop(gio::spawn_blocking(move || {
-        image_store::delete_asset(&paths, &image);
-    }));
+    glib::MainContext::default().spawn_local(async move {
+        if gio::spawn_blocking(move || image_store::delete_asset(&paths, &image))
+            .await
+            .is_err()
+        {
+            eprintln!("lionclip: image storage cleanup failed stage=worker-panic");
+        }
+    });
 }
 
 fn notify_if_changed(update: HistoryUpdate, history_changed: &HistoryChangedCallback) {
