@@ -60,6 +60,7 @@ impl Default for TextHistory {
 }
 
 impl TextHistory {
+    #[cfg(test)]
     pub(crate) fn persistent(paths: StoragePaths) -> Result<Self, PersistenceError> {
         let cleanup = ImageCleanupCoordinator::new(paths.clone());
         Self::persistent_with_cleanup(paths, cleanup)
@@ -174,6 +175,7 @@ impl TextHistory {
         self.items.iter().find(|item| item.id() == id)
     }
 
+    #[cfg(test)]
     pub fn contains_image_hash(&self, content_hash: &str) -> bool {
         self.items.iter().any(|item| {
             item.image()
