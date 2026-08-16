@@ -282,9 +282,11 @@ AdwApplicationWindow (430 px, undecorated, non-resizable)
 
 Height follows content up to the list cap, so a short history stays small.
 Rows are rebuilt from the filtered snapshot; row identity for every action is
-`HistoryItemId`, never the GTK row index. Row actions (pin toggle, delete) are
-real buttons that stay reachable by keyboard and are revealed on hover,
-selection or focus by a small stylesheet with no hardcoded colors.
+`HistoryItemId`, never the GTK row index. Row actions are real buttons that stay
+reachable by keyboard and are revealed on hover, selection or focus by a small
+stylesheet with no hardcoded colors. The pin is a toggle, so the theme draws it
+checked and the pinned state is visible on the row itself, next to the pinned
+group's position in the list.
 
 The rounded surface is the content box, not the toplevel: it carries Adwaita's
 own `.background` style plus a corner radius and clips its children. The

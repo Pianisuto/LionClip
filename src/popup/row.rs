@@ -35,13 +35,24 @@ pub(super) fn build(
         .valign(gtk::Align::Center)
         .build();
 
+    // A toggle carries the pinned state itself: Adwaita draws it checked, so a
+    // pinned item is recognisable without reading the tooltip.
     let pin_label = if item.is_pinned() {
         "Unpin item"
     } else {
         "Pin item"
     };
-    let pin = action_button("view-pin-symbolic", pin_label);
-    pin.connect_clicked(move |_| on_toggle_pin());
+    let pin = gtk::ToggleButton::builder()
+        .icon_name("view-pin-symbolic")
+        .tooltip_text(pin_label)
+        .active(item.is_pinned())
+        .valign(gtk::Align::Center)
+        .build();
+    pin.add_css_class("flat");
+    pin.add_css_class("circular");
+    pin.update_property(&[gtk::accessible::Property::Label(pin_label)]);
+    // Connected after the initial state, so restoring it never re-enters here.
+    pin.connect_toggled(move |_| on_toggle_pin());
 
     let delete = action_button("user-trash-symbolic", "Delete item");
     delete.connect_clicked(move |_| on_delete());
@@ -77,7 +88,7 @@ pub(super) fn build(
 
     RowWidgets {
         row,
-        actions: [pin, delete],
+        actions: [pin.upcast(), delete],
     }
 }
 
