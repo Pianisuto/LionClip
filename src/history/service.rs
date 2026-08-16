@@ -1,4 +1,8 @@
-use crate::{image_store::MAX_IMAGE_STORAGE_BYTES, storage::StoragePaths};
+use crate::{
+    image_cleanup::ImageCleanupCoordinator,
+    image_store::MAX_IMAGE_STORAGE_BYTES,
+    storage::StoragePaths,
+};
 
 use super::{
     HistoryItemId, HistoryQuery, ImageData, TextHistoryItem,
@@ -41,6 +45,7 @@ pub struct TextHistory {
     unpinned_limit: usize,
     image_storage_limit: u64,
     persistence: Option<PersistenceWorker>,
+    image_cleanup: Option<ImageCleanupCoordinator>,
 }
 
 impl Default for TextHistory {
@@ -50,19 +55,39 @@ impl Default for TextHistory {
             DEFAULT_UNPINNED_LIMIT,
             MAX_IMAGE_STORAGE_BYTES,
             None,
+            None,
         )
     }
 }
 
 impl TextHistory {
     pub(crate) fn persistent(paths: StoragePaths) -> Result<Self, PersistenceError> {
+        let cleanup = ImageCleanupCoordinator::new(paths.clone());
+        Self::persistent_with_cleanup(paths, cleanup)
+    }
+
+    pub(crate) fn persistent_with_cleanup(
+        paths: StoragePaths,
+        image_cleanup: ImageCleanupCoordinator,
+    ) -> Result<Self, PersistenceError> {
         let (persistence, items) = PersistenceWorker::open(paths)?;
         Ok(Self::from_items(
             items,
             DEFAULT_UNPINNED_LIMIT,
             MAX_IMAGE_STORAGE_BYTES,
             Some(persistence),
+            Some(image_cleanup),
         ))
+    }
+
+    pub(crate) fn in_memory_with_cleanup(image_cleanup: ImageCleanupCoordinator) -> Self {
+        Self::from_items(
+            Vec::new(),
+            DEFAULT_UNPINNED_LIMIT,
+            MAX_IMAGE_STORAGE_BYTES,
+            None,
+            Some(image_cleanup),
+        )
     }
 
     fn from_items(
@@ -70,6 +95,7 @@ impl TextHistory {
         unpinned_limit: usize,
         image_storage_limit: u64,
         persistence: Option<PersistenceWorker>,
+        image_cleanup: Option<ImageCleanupCoordinator>,
     ) -> Self {
         sort_items(&mut items);
         let next_id = next_value(items.iter().map(|item| item.id().value()));
@@ -81,6 +107,7 @@ impl TextHistory {
             unpinned_limit,
             image_storage_limit,
             persistence,
+            image_cleanup,
         };
         let mut removed_ids = history.enforce_image_storage_limit();
         removed_ids.extend(history.enforce_retention());
@@ -89,6 +116,7 @@ impl TextHistory {
         if !removed_ids.is_empty() {
             history.persist(PersistenceMutation::Delete { removed_ids });
         }
+        history.flush_image_cleanup();
         history
     }
 
@@ -108,6 +136,7 @@ impl TextHistory {
         sort_items(&mut self.items);
         let removed_ids = self.enforce_retention();
         self.persist(PersistenceMutation::Upsert { item, removed_ids });
+        self.flush_image_cleanup();
         HistoryUpdate::Inserted
     }
 
@@ -134,6 +163,7 @@ impl TextHistory {
         sort_items(&mut self.items);
         removed_ids.extend(self.enforce_retention());
         self.persist(PersistenceMutation::Upsert { item, removed_ids });
+        self.flush_image_cleanup();
         HistoryUpdate::Inserted
     }
 
@@ -165,13 +195,14 @@ impl TextHistory {
     }
 
     pub fn delete(&mut self, id: HistoryItemId) -> HistoryChange {
-        let Some(index) = self.items.iter().position(|item| item.id() == id) else {
+        if self.item(id).is_none() {
             return HistoryChange::Rejected;
-        };
-        self.items.remove(index);
+        }
+        self.remove_ids(&[id]);
         self.persist(PersistenceMutation::Delete {
             removed_ids: vec![id],
         });
+        self.flush_image_cleanup();
         HistoryChange::Applied
     }
 
@@ -179,13 +210,26 @@ impl TextHistory {
         if !self.has_unpinned() {
             return HistoryChange::Rejected;
         }
-        self.items.retain(TextHistoryItem::is_pinned);
+        let removed_ids = self
+            .items
+            .iter()
+            .filter(|item| !item.is_pinned())
+            .map(TextHistoryItem::id)
+            .collect::<Vec<_>>();
+        self.remove_ids(&removed_ids);
         self.persist(PersistenceMutation::ClearUnpinned);
+        self.flush_image_cleanup();
         HistoryChange::Applied
     }
 
     pub fn has_unpinned(&self) -> bool {
         self.items.iter().any(|item| !item.is_pinned())
+    }
+
+    pub(crate) fn flush_image_cleanup(&self) {
+        if let Some(cleanup) = &self.image_cleanup {
+            cleanup.flush(&self.items);
+        }
     }
 
     pub(crate) fn shutdown_persistence(&mut self) {
@@ -232,6 +276,7 @@ impl TextHistory {
         };
         removed_ids.extend(self.enforce_retention());
         self.persist(PersistenceMutation::Upsert { item, removed_ids });
+        self.flush_image_cleanup();
         HistoryChange::Applied
     }
 
@@ -245,21 +290,17 @@ impl TextHistory {
 
     fn enforce_retention(&mut self) -> Vec<HistoryItemId> {
         let mut unpinned_seen = 0;
-        let mut remove_indices = Vec::new();
-        for (index, item) in self.items.iter().enumerate() {
+        let mut remove_ids = Vec::new();
+        for item in &self.items {
             if item.is_pinned() {
                 continue;
             }
             unpinned_seen += 1;
             if unpinned_seen > self.unpinned_limit {
-                remove_indices.push(index);
+                remove_ids.push(item.id());
             }
         }
-        remove_indices
-            .into_iter()
-            .rev()
-            .map(|index| self.items.remove(index).id())
-            .collect()
+        self.remove_ids(&remove_ids)
     }
 
     fn enforce_image_storage_limit(&mut self) -> Vec<HistoryItemId> {
@@ -320,14 +361,17 @@ impl TextHistory {
     }
 
     fn remove_ids(&mut self, ids: &[HistoryItemId]) -> Vec<HistoryItemId> {
+        let cleanup = self.image_cleanup.clone();
         let mut removed = Vec::new();
         self.items.retain(|item| {
-            if ids.contains(&item.id()) {
-                removed.push(item.id());
-                false
-            } else {
-                true
+            if !ids.contains(&item.id()) {
+                return true;
             }
+            if let (Some(cleanup), Some(image)) = (&cleanup, item.image()) {
+                cleanup.queue(image.clone());
+            }
+            removed.push(item.id());
+            false
         });
         removed
     }
@@ -415,7 +459,7 @@ mod tests {
 
     #[test]
     fn storage_cap_evicts_oldest_unpinned_image() {
-        let mut history = TextHistory::from_items(Vec::new(), 500, 150, None);
+        let mut history = TextHistory::from_items(Vec::new(), 500, 150, None, None);
         history.record_image(image('a', 100));
         history.record_image(image('b', 100));
         assert_eq!(history.items().len(), 1);
@@ -424,7 +468,7 @@ mod tests {
 
     #[test]
     fn storage_cap_never_evicts_pinned_image_for_new_capture() {
-        let mut history = TextHistory::from_items(Vec::new(), 500, 150, None);
+        let mut history = TextHistory::from_items(Vec::new(), 500, 150, None, None);
         history.record_image(image('a', 100));
         let id = history.items()[0].id();
         history.pin(id);
