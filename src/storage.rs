@@ -14,17 +14,47 @@ impl fmt::Display for DataPathError {
     }
 }
 
-pub fn database_path() -> Result<PathBuf, DataPathError> {
-    database_path_from(
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoragePaths {
+    root: PathBuf,
+    database: PathBuf,
+    blobs: PathBuf,
+    thumbnails: PathBuf,
+}
+
+impl StoragePaths {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn database(&self) -> &Path {
+        &self.database
+    }
+
+    pub fn blobs(&self) -> &Path {
+        &self.blobs
+    }
+
+    pub fn thumbnails(&self) -> &Path {
+        &self.thumbnails
+    }
+}
+
+pub fn paths() -> Result<StoragePaths, DataPathError> {
+    paths_from(
         env::var_os("XDG_DATA_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
     )
 }
 
-fn database_path_from(
+pub fn database_path() -> Result<PathBuf, DataPathError> {
+    Ok(paths()?.database)
+}
+
+fn paths_from(
     xdg_data_home: Option<&OsStr>,
     home: Option<&OsStr>,
-) -> Result<PathBuf, DataPathError> {
+) -> Result<StoragePaths, DataPathError> {
     let data_home = xdg_data_home
         .filter(|path| !path.is_empty() && Path::new(path).is_absolute())
         .map(PathBuf::from)
@@ -34,7 +64,13 @@ fn database_path_from(
         })
         .ok_or(DataPathError)?;
 
-    Ok(data_home.join("lionclip/lionclip.db"))
+    let root = data_home.join("lionclip");
+    Ok(StoragePaths {
+        database: root.join("lionclip.db"),
+        blobs: root.join("blobs"),
+        thumbnails: root.join("thumbnails"),
+        root,
+    })
 }
 
 #[cfg(test)]
@@ -43,39 +79,48 @@ mod tests {
 
     #[test]
     fn xdg_data_home_override_is_respected_exactly() {
+        let paths = paths_from(
+            Some(OsStr::new("/tmp/custom-data")),
+            Some(OsStr::new("/home/user")),
+        )
+        .unwrap();
+
+        assert_eq!(paths.root(), Path::new("/tmp/custom-data/lionclip"));
         assert_eq!(
-            database_path_from(
-                Some(OsStr::new("/tmp/custom-data")),
-                Some(OsStr::new("/home/user"))
-            ),
-            Ok(PathBuf::from("/tmp/custom-data/lionclip/lionclip.db"))
+            paths.database(),
+            Path::new("/tmp/custom-data/lionclip/lionclip.db")
+        );
+        assert_eq!(paths.blobs(), Path::new("/tmp/custom-data/lionclip/blobs"));
+        assert_eq!(
+            paths.thumbnails(),
+            Path::new("/tmp/custom-data/lionclip/thumbnails")
         );
     }
 
     #[test]
     fn home_fallback_uses_standard_local_share_path() {
+        let paths = paths_from(None, Some(OsStr::new("/home/user"))).unwrap();
+
         assert_eq!(
-            database_path_from(None, Some(OsStr::new("/home/user"))),
-            Ok(PathBuf::from(
-                "/home/user/.local/share/lionclip/lionclip.db"
-            ))
+            paths.database(),
+            Path::new("/home/user/.local/share/lionclip/lionclip.db")
         );
     }
 
     #[test]
     fn empty_xdg_override_uses_home_fallback() {
+        let paths = paths_from(Some(OsStr::new("")), Some(OsStr::new("/home/user"))).unwrap();
+
         assert_eq!(
-            database_path_from(Some(OsStr::new("")), Some(OsStr::new("/home/user"))),
-            Ok(PathBuf::from(
-                "/home/user/.local/share/lionclip/lionclip.db"
-            ))
+            paths.database(),
+            Path::new("/home/user/.local/share/lionclip/lionclip.db")
         );
     }
 
     #[test]
     fn relative_paths_cannot_resolve_against_the_working_directory() {
         assert_eq!(
-            database_path_from(
+            paths_from(
                 Some(OsStr::new("relative")),
                 Some(OsStr::new("also-relative"))
             ),
