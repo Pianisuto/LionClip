@@ -108,8 +108,11 @@ pub fn blob_path(paths: &StoragePaths, image: &ImageData) -> Option<PathBuf> {
 }
 
 pub fn thumbnail_path(paths: &StoragePaths, image: &ImageData) -> Option<PathBuf> {
-    valid_hash(image.content_hash())
-        .then(|| paths.thumbnails().join(format!("{}.png", image.content_hash())))
+    valid_hash(image.content_hash()).then(|| {
+        paths
+            .thumbnails()
+            .join(format!("{}.png", image.content_hash()))
+    })
 }
 
 pub fn delete_asset(paths: &StoragePaths, image: &ImageData) {
@@ -233,14 +236,12 @@ fn thumbnail_dimensions(width: u32, height: u32) -> (u32, u32) {
     let width_limited = u64::from(width) * u64::from(THUMBNAIL_MAX_HEIGHT)
         >= u64::from(height) * u64::from(THUMBNAIL_MAX_WIDTH);
     if width_limited {
-        let scaled_height = (u64::from(height) * u64::from(THUMBNAIL_MAX_WIDTH)
-            / u64::from(width))
-        .max(1);
+        let scaled_height =
+            (u64::from(height) * u64::from(THUMBNAIL_MAX_WIDTH) / u64::from(width)).max(1);
         (THUMBNAIL_MAX_WIDTH, scaled_height as u32)
     } else {
-        let scaled_width = (u64::from(width) * u64::from(THUMBNAIL_MAX_HEIGHT)
-            / u64::from(height))
-        .max(1);
+        let scaled_width =
+            (u64::from(width) * u64::from(THUMBNAIL_MAX_HEIGHT) / u64::from(height)).max(1);
         (scaled_width as u32, THUMBNAIL_MAX_HEIGHT)
     }
 }
@@ -248,9 +249,7 @@ fn thumbnail_dimensions(width: u32, height: u32) -> (u32, u32) {
 fn ensure_private_directory(path: &Path) -> Result<(), ImageStoreError> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true).mode(0o700);
-    builder
-        .create(path)
-        .map_err(|_| ImageStoreError::Directory)
+    builder.create(path).map_err(|_| ImageStoreError::Directory)
 }
 
 fn write_atomic_if_missing(path: &Path, bytes: &[u8]) -> Result<bool, ImageStoreError> {
@@ -261,10 +260,7 @@ fn write_atomic_if_missing(path: &Path, bytes: &[u8]) -> Result<bool, ImageStore
     ensure_private_directory(parent)?;
 
     let suffix = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-    let temp = parent.join(format!(
-        ".lionclip-{}-{suffix}.tmp",
-        std::process::id()
-    ));
+    let temp = parent.join(format!(".lionclip-{}-{suffix}.tmp", std::process::id()));
     let result = (|| {
         let mut file = OpenOptions::new()
             .create_new(true)

@@ -293,7 +293,8 @@ impl Repository {
             .open(path)
             .map_err(|_| PersistenceError::at("database-file"))?;
 
-        let connection = Connection::open(path).map_err(|_| PersistenceError::at("database-open"))?;
+        let connection =
+            Connection::open(path).map_err(|_| PersistenceError::at("database-open"))?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| PersistenceError::at("database-configuration"))?;
@@ -568,7 +569,10 @@ fn image_from_columns(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     use super::*;
 

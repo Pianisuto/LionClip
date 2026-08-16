@@ -45,7 +45,12 @@ pub struct TextHistory {
 
 impl Default for TextHistory {
     fn default() -> Self {
-        Self::from_items(Vec::new(), DEFAULT_UNPINNED_LIMIT, MAX_IMAGE_STORAGE_BYTES, None)
+        Self::from_items(
+            Vec::new(),
+            DEFAULT_UNPINNED_LIMIT,
+            MAX_IMAGE_STORAGE_BYTES,
+            None,
+        )
     }
 }
 
@@ -123,13 +128,8 @@ impl TextHistory {
         };
 
         let mut removed_ids = self.remove_ids(&evictions);
-        let item = TextHistoryItem::new_image(
-            HistoryItemId::new(id),
-            image,
-            sequence,
-            sequence,
-            false,
-        );
+        let item =
+            TextHistoryItem::new_image(HistoryItemId::new(id), image, sequence, sequence, false);
         self.items.push(item.clone());
         sort_items(&mut self.items);
         removed_ids.extend(self.enforce_retention());
@@ -169,7 +169,9 @@ impl TextHistory {
             return HistoryChange::Rejected;
         };
         self.items.remove(index);
-        self.persist(PersistenceMutation::Delete { removed_ids: vec![id] });
+        self.persist(PersistenceMutation::Delete {
+            removed_ids: vec![id],
+        });
         HistoryChange::Applied
     }
 
@@ -366,7 +368,13 @@ mod tests {
     use crate::history::ImageMime;
 
     fn image(key: char, bytes: u64) -> ImageData {
-        ImageData::new(key.to_string().repeat(64), ImageMime::Png, bytes, 1920, 1080)
+        ImageData::new(
+            key.to_string().repeat(64),
+            ImageMime::Png,
+            bytes,
+            1920,
+            1080,
+        )
     }
 
     #[test]
@@ -397,7 +405,10 @@ mod tests {
         history.record_image(image('a', 100));
         let id = history.items()[0].id();
         history.record("later".into());
-        assert_eq!(history.record_image(image('a', 100)), HistoryUpdate::MovedToFront);
+        assert_eq!(
+            history.record_image(image('a', 100)),
+            HistoryUpdate::MovedToFront
+        );
         assert_eq!(history.items()[0].id(), id);
         assert_eq!(history.items().len(), 2);
     }
@@ -417,7 +428,10 @@ mod tests {
         history.record_image(image('a', 100));
         let id = history.items()[0].id();
         history.pin(id);
-        assert_eq!(history.record_image(image('b', 100)), HistoryUpdate::Rejected);
+        assert_eq!(
+            history.record_image(image('b', 100)),
+            HistoryUpdate::Rejected
+        );
         assert_eq!(history.items().len(), 1);
         assert_eq!(history.items()[0].id(), id);
     }
