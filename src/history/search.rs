@@ -50,7 +50,10 @@ fn contains_ignoring_case(haystack: &str, lowercase_needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::{HistoryItemId, ImageData, ImageMime}, *};
+    use super::{
+        super::{HistoryItemId, ImageData, ImageMime},
+        *,
+    };
 
     fn text_items(texts: &[&str]) -> Vec<TextHistoryItem> {
         texts
@@ -94,7 +97,10 @@ mod tests {
     fn matching_is_case_insensitive_and_uses_substrings() {
         let items = text_items(&["Hello World", "https://example.com/path"]);
         assert_eq!(matching(&items, "hello"), ["Hello World"]);
-        assert_eq!(matching(&items, "EXAMPLE.COM"), ["https://example.com/path"]);
+        assert_eq!(
+            matching(&items, "EXAMPLE.COM"),
+            ["https://example.com/path"]
+        );
     }
 
     #[test]
