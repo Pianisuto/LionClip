@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use crate::{image_store, storage::StoragePaths};
 
@@ -226,14 +226,14 @@ fn worker_main(
         }
     };
 
+    // Startup is the one filesystem reconciliation owned by the database
+    // worker: no live clipboard capture exists yet, so there is no concurrent
+    // blob publication to race with orphan cleanup.
     match image_store::reconcile(&paths, &initial_items) {
         Ok(missing_ids) if !missing_ids.is_empty() => {
-            if let Err(error) = repository.apply(
-                PersistenceMutation::Delete {
-                    removed_ids: missing_ids.clone(),
-                },
-                &paths,
-            ) {
+            if let Err(error) = repository.apply(PersistenceMutation::Delete {
+                removed_ids: missing_ids.clone(),
+            }) {
                 let _ = initial_sender.send(Err(error));
                 return;
             }
@@ -254,7 +254,7 @@ fn worker_main(
     while let Ok(command) = command_receiver.recv() {
         match command {
             WorkerCommand::Apply(mutation) => {
-                if let Err(error) = repository.apply(mutation, &paths) {
+                if let Err(error) = repository.apply(mutation) {
                     write_failure = Some(error);
                     eprintln!(
                         "lionclip: persistence write failed stage={}",
@@ -359,17 +359,10 @@ impl Repository {
             .map_err(|_| PersistenceError::at("history-load-row"))
     }
 
-    fn apply(
-        &mut self,
-        mutation: PersistenceMutation,
-        paths: &StoragePaths,
-    ) -> Result<(), PersistenceError> {
-        let assets_to_remove = match &mutation {
-            PersistenceMutation::Upsert { removed_ids, .. }
-            | PersistenceMutation::Delete { removed_ids } => self.images_for_ids(removed_ids)?,
-            PersistenceMutation::ClearUnpinned => self.unpinned_images()?,
-        };
-
+    fn apply(&mut self, mutation: PersistenceMutation) -> Result<(), PersistenceError> {
+        // This worker persists metadata only. Live blob deletion is coordinated
+        // by the main-thread history/capture lifecycle so an older delete cannot
+        // race a same-image recapture that is reusing the content-addressed file.
         let transaction = self
             .connection
             .transaction()
@@ -390,47 +383,7 @@ impl Repository {
         }
         transaction
             .commit()
-            .map_err(|_| PersistenceError::at("history-write-commit"))?;
-
-        for image in assets_to_remove {
-            image_store::delete_asset(paths, &image);
-        }
-        Ok(())
-    }
-
-    fn images_for_ids(&self, ids: &[HistoryItemId]) -> Result<Vec<ImageData>, PersistenceError> {
-        let mut images = Vec::new();
-        for id in ids {
-            let image = self
-                .connection
-                .query_row(
-                    "SELECT content_hash, mime_type, byte_length, image_width, image_height
-                     FROM history_items WHERE id = ?1 AND kind = 'image'",
-                    [id.value()],
-                    image_from_row,
-                )
-                .optional()
-                .map_err(|_| PersistenceError::at("history-image-cleanup-query"))?;
-            if let Some(image) = image {
-                images.push(image);
-            }
-        }
-        Ok(images)
-    }
-
-    fn unpinned_images(&self) -> Result<Vec<ImageData>, PersistenceError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT content_hash, mime_type, byte_length, image_width, image_height
-                 FROM history_items WHERE kind = 'image' AND pinned = 0",
-            )
-            .map_err(|_| PersistenceError::at("history-image-cleanup-prepare"))?;
-        let rows = statement
-            .query_map([], image_from_row)
-            .map_err(|_| PersistenceError::at("history-image-cleanup-query"))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|_| PersistenceError::at("history-image-cleanup-row"))
+            .map_err(|_| PersistenceError::at("history-write-commit"))
     }
 
     #[cfg(test)]
@@ -544,27 +497,30 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<TextHistoryItem> {
     }
 }
 
-fn image_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageData> {
-    image_from_columns(row, 0)
-}
-
 fn image_from_columns(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<ImageData> {
     let hash: String = row.get(start)?;
     let mime: String = row.get(start + 1)?;
     let mime = ImageMime::parse(&mime).ok_or(rusqlite::Error::InvalidQuery)?;
-    let byte_length: i64 = row.get(start + 2)?;
-    let width: i64 = row.get(start + 3)?;
-    let height: i64 = row.get(start + 4)?;
-    if byte_length <= 0 || width <= 0 || height <= 0 {
+    let byte_length = u64::try_from(row.get::<_, i64>(start + 2)?)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let width = u32::try_from(row.get::<_, i64>(start + 3)?)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let height = u32::try_from(row.get::<_, i64>(start + 4)?)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+
+    let dimensions_valid = width > 0
+        && height > 0
+        && width <= image_store::MAX_IMAGE_DIMENSION
+        && height <= image_store::MAX_IMAGE_DIMENSION
+        && u64::from(width).saturating_mul(u64::from(height)) <= image_store::MAX_IMAGE_PIXELS;
+    if byte_length == 0
+        || byte_length > image_store::MAX_IMAGE_ENCODED_BYTES as u64
+        || !dimensions_valid
+    {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    Ok(ImageData::new(
-        hash,
-        mime,
-        byte_length as u64,
-        width as u32,
-        height as u32,
-    ))
+
+    Ok(ImageData::new(hash, mime, byte_length, width, height))
 }
 
 #[cfg(test)]
@@ -647,15 +603,29 @@ mod tests {
             true,
         );
         repository
-            .apply(
-                PersistenceMutation::Upsert {
-                    item: item.clone(),
-                    removed_ids: Vec::new(),
-                },
-                &storage.paths,
-            )
+            .apply(PersistenceMutation::Upsert {
+                item: item.clone(),
+                removed_ids: Vec::new(),
+            })
             .unwrap();
         assert_eq!(repository.load().unwrap(), vec![item]);
+    }
+
+    #[test]
+    fn invalid_persisted_image_metadata_is_rejected() {
+        let storage = TestStorage::new("invalid-image-metadata");
+        let repository = Repository::open(storage.paths.database()).unwrap();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO history_items (
+                    id, kind, content_hash, mime_type, byte_length,
+                    image_width, image_height, created_sequence, last_used_sequence, pinned
+                 ) VALUES (1, 'image', ?1, 'image/png', 1, ?2, 1, 1, 1, 0)",
+                params!["a".repeat(64), i64::from(image_store::MAX_IMAGE_DIMENSION) + 1],
+            )
+            .unwrap();
+        assert!(repository.load().is_err());
     }
 
     #[test]
