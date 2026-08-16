@@ -501,12 +501,12 @@ fn image_from_columns(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result
     let hash: String = row.get(start)?;
     let mime: String = row.get(start + 1)?;
     let mime = ImageMime::parse(&mime).ok_or(rusqlite::Error::InvalidQuery)?;
-    let byte_length = u64::try_from(row.get::<_, i64>(start + 2)?)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let width = u32::try_from(row.get::<_, i64>(start + 3)?)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let height = u32::try_from(row.get::<_, i64>(start + 4)?)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let byte_length =
+        u64::try_from(row.get::<_, i64>(start + 2)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let width =
+        u32::try_from(row.get::<_, i64>(start + 3)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let height =
+        u32::try_from(row.get::<_, i64>(start + 4)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
 
     let dimensions_valid = width > 0
         && height > 0
@@ -622,7 +622,10 @@ mod tests {
                     id, kind, content_hash, mime_type, byte_length,
                     image_width, image_height, created_sequence, last_used_sequence, pinned
                  ) VALUES (1, 'image', ?1, 'image/png', 1, ?2, 1, 1, 1, 0)",
-                params!["a".repeat(64), i64::from(image_store::MAX_IMAGE_DIMENSION) + 1],
+                params![
+                    "a".repeat(64),
+                    i64::from(image_store::MAX_IMAGE_DIMENSION) + 1
+                ],
             )
             .unwrap();
         assert!(repository.load().is_err());
