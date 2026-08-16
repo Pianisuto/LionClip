@@ -390,13 +390,29 @@ mod tests {
         assert_eq!(fs::read(&original).unwrap(), bytes);
         assert_eq!(first.image.width(), 640);
         assert_eq!(first.image.height(), 360);
-        assert!(original.file_name().unwrap().to_string_lossy().starts_with(first.image.content_hash()));
+        assert!(
+            original
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(first.image.content_hash())
+        );
         assert_eq!(
-            fs::metadata(storage.paths.blobs()).unwrap().permissions().mode() & 0o777,
+            fs::metadata(storage.paths.blobs())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o700
         );
-        assert_eq!(fs::metadata(&original).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(fs::metadata(&thumbnail).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&original).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&thumbnail).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let second = process_and_store(&storage.paths, ImageMime::Png, bytes).unwrap();
         assert!(!second.original_created);
@@ -410,12 +426,8 @@ mod tests {
     #[test]
     fn reconciliation_removes_orphans_and_reports_missing_referenced_blob() {
         let storage = TestStorage::new("reconcile");
-        let stored = process_and_store(
-            &storage.paths,
-            ImageMime::Png,
-            synthetic_png(32, 16),
-        )
-        .unwrap();
+        let stored =
+            process_and_store(&storage.paths, ImageMime::Png, synthetic_png(32, 16)).unwrap();
         let mut history = TextHistory::default();
         assert!(history.record_image(stored.image.clone()).changed());
         let item = history.items()[0].clone();
@@ -424,7 +436,11 @@ mod tests {
         let orphan_thumb = storage.paths.thumbnails().join("orphan.tmp");
         fs::write(&orphan_blob, b"orphan").unwrap();
         fs::write(&orphan_thumb, b"orphan").unwrap();
-        assert!(reconcile(&storage.paths, std::slice::from_ref(&item)).unwrap().is_empty());
+        assert!(
+            reconcile(&storage.paths, std::slice::from_ref(&item))
+                .unwrap()
+                .is_empty()
+        );
         assert!(!orphan_blob.exists());
         assert!(!orphan_thumb.exists());
 
