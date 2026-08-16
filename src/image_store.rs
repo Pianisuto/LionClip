@@ -455,18 +455,18 @@ mod tests {
     #[test]
     fn malformed_and_oversized_payloads_are_rejected_without_files() {
         let storage = TestStorage::new("reject");
-        assert_eq!(
+        assert!(matches!(
             process_and_store(&storage.paths, ImageMime::Png, b"not-a-png".to_vec()),
             Err(ImageStoreError::InvalidImage)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             process_and_store(
                 &storage.paths,
                 ImageMime::Png,
                 vec![0; MAX_IMAGE_ENCODED_BYTES + 1]
             ),
             Err(ImageStoreError::TooLarge)
-        );
+        ));
         assert!(!storage.paths.blobs().exists());
         assert!(!storage.paths.thumbnails().exists());
     }
