@@ -284,12 +284,21 @@ Height follows content up to the list cap, so a short history stays small.
 Rows are rebuilt from the filtered snapshot; row identity for every action is
 `HistoryItemId`, never the GTK row index. Row actions (pin toggle, delete) are
 real buttons that stay reachable by keyboard and are revealed on hover,
-selection or focus by a four-line stylesheet with no hardcoded colors.
+selection or focus by a small stylesheet with no hardcoded colors.
+
+The rounded surface is the content box, not the toplevel: it carries Adwaita's
+own `.background` style plus a corner radius and clips its children. The
+toplevel background is explicitly transparent, which is what makes the corners
+work — GTK marks the whole surface opaque whenever the window background is
+opaque, and the compositor then skips blending and leaves black behind the
+rounded corners.
 
 ### Interaction
 
 - typing anywhere filters, including while a result row holds focus;
-- `Down`/`Up` move the selection, `Up` on the first result returns to search;
+- `Down` always advances from the current selection, so the first press from the
+  search field lands on the second result — the first one is already selected on
+  open — and `Up` on the first result returns to the search field;
 - `Enter` restores the selection and hides the popup;
 - `Escape` clears a non-empty search, otherwise hides the popup;
 - `Delete` removes the selected item when focus is in the result list, so it
@@ -338,6 +347,14 @@ trait PopupPositioner {
 ```
 
 The final API should follow what GTK/GDK actually permits; do not force this exact signature.
+
+### Reveal on open
+
+The X11 backend can only place the popup once its surface exists, which is after
+the compositor has already mapped it somewhere. The window is therefore
+presented fully transparent and revealed on the first frame, once placement has
+been applied, so it never appears at the compositor's position first. Placement,
+clamping and the fallback path are unchanged.
 
 ### Phase 0 result
 

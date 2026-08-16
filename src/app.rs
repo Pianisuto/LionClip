@@ -111,10 +111,18 @@ impl AppState {
 
     fn show_popup(&self) {
         if !self.popup.window.is_visible() {
+            // The popup can only be placed once its surface exists, so it is
+            // presented fully transparent and revealed on the first frame,
+            // after placement has been applied. Without this the first frame is
+            // visible wherever the compositor put the window and the popup
+            // appears to jump to the pointer.
+            self.popup.window.set_opacity(0.0);
+
             let positioner = self.positioner.clone();
             self.popup.window.add_tick_callback(move |window, _| {
                 let outcome = positioner.place(window);
                 println!("{}", outcome.log_line());
+                window.set_opacity(1.0);
                 glib::ControlFlow::Break
             });
         }

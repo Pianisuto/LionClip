@@ -14,9 +14,21 @@ const POPUP_WIDTH: i32 = 430;
 const PLACEHOLDER_HEIGHT: i32 = 128;
 const LIST_MAX_HEIGHT: i32 = 360;
 
-/// Reveals row actions on hover, selection or keyboard focus only. Kept free of
-/// explicit colors so the popup follows the system light/dark appearance.
+/// Keeps the popup a single rounded surface and reveals row actions on hover,
+/// selection or keyboard focus. No color is named here: the rounded surface
+/// carries Adwaita's own `.background` style, so light and dark both follow the
+/// system theme. The transparent toplevel matters beyond looks — GTK marks the
+/// whole surface opaque when the window background is opaque, which makes the
+/// compositor skip blending and paint black behind the rounded corners.
 const POPUP_CSS: &str = "\
+window.lionclip-popup {
+  background-color: transparent;
+}
+
+.lionclip-surface {
+  border-radius: 12px;
+}
+
 .lionclip-actions {
   opacity: 0;
   transition: opacity 100ms ease-out;
@@ -73,6 +85,7 @@ pub fn build(
         .decorated(false)
         .resizable(false)
         .build();
+    window.add_css_class("lionclip-popup");
 
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Search clipboard…")
@@ -143,6 +156,10 @@ pub fn build(
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
+    content.add_css_class("background");
+    content.add_css_class("lionclip-surface");
+    // Clips row highlights and the list to the rounded corners.
+    content.set_overflow(gtk::Overflow::Hidden);
     content.append(&header);
     content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     content.append(&scrolled);
@@ -470,15 +487,16 @@ impl PopupState {
             return;
         }
 
-        let current = self.selected_index().unwrap_or(0);
-        if !self.focus_within(&self.list) {
-            // The first Down moves focus onto the already selected result.
-            if delta > 0 {
-                self.focus_row(current.min(count - 1));
-            }
+        let Some(current) = self.selected_index() else {
+            // Without a selection the first result is the target either way.
+            self.focus_row(0);
             return;
-        }
+        };
 
+        // Down always advances from the current selection, including the very
+        // first press while the search field still has the focus: the first
+        // result is already selected on open, so stopping there would cost an
+        // extra keystroke.
         if delta < 0 && current == 0 {
             self.focus_search();
             return;
