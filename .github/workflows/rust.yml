@@ -35,15 +35,65 @@ jobs:
         with:
           components: clippy,rustfmt
 
-      - name: Format Phase 4 branch once
+      - name: Apply Phase 4 mechanical fixes
         if: github.event_name == 'pull_request' && github.head_ref == 'gpt/issue-5-phase-4'
         run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          image_store = Path('src/image_store.rs')
+          text = image_store.read_text()
+          text = text.replace('gdk_pixbuf::{InterpType, PixbufLoader, prelude::*}', 'gdk_pixbuf::{PixbufLoader, prelude::*}')
+          image_store.write_text(text)
+
+          model = Path('src/history/model.rs')
+          text = model.read_text()
+          text = re.sub(
+              r'\n    /// Compatibility accessor for the Phase 1-3 text-only call sites/tests\.\n'
+              r'    /// Mixed-payload code should prefer \[`Self::as_text`\]\.\n'
+              r'    pub fn text\(&self\) -> &str \{\n'
+              r'        self\.as_text\(\)\.unwrap_or\(""\)\n'
+              r'    \}\n',
+              '\n',
+              text,
+          )
+          model.write_text(text)
+
+          storage = Path('src/storage.rs')
+          text = storage.read_text()
+          text = text.replace('    root: PathBuf,\n', '')
+          text = text.replace('            root,\n', '')
+          text = re.sub(
+              r'\n    pub fn root\(&self\) -> &Path \{\n        &self\.root\n    \}\n',
+              '\n',
+              text,
+          )
+          text = re.sub(
+              r'\npub fn database_path\(\) -> Result<PathBuf, DataPathError> \{\n    Ok\(paths\(\)\?\.database\)\n\}\n',
+              '\n',
+              text,
+          )
+          text = text.replace(
+              '        assert_eq!(paths.root(), Path::new("/tmp/custom-data/lionclip"));',
+              '        assert_eq!(\n            paths.database().parent(),\n            Some(Path::new("/tmp/custom-data/lionclip"))\n        );',
+          )
+          storage.write_text(text)
+
+          repository = Path('src/history/repository.rs')
+          text = repository.read_text()
+          text = text.replace(
+              '''        assert_eq!(\n            Repository::open(storage.paths.database()),\n            Err(PersistenceError::at("migration-version-newer"))\n        );''',
+              '''        assert!(matches!(\n            Repository::open(storage.paths.database()),\n            Err(PersistenceError {\n                stage: "migration-version-newer"\n            })\n        ));''',
+          )
+          repository.write_text(text)
+          PY
           cargo fmt
           if ! git diff --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add src
-            git commit -m 'style: rustfmt Phase 4'
+            git commit -m 'fix: resolve Phase 4 compile nits'
             git push origin HEAD:${GITHUB_HEAD_REF}
           fi
 
