@@ -19,15 +19,17 @@ impl SelfWriteSuppression {
     }
 
     pub fn should_suppress_text(&mut self, observed_text: &str) -> bool {
-        self.pending
-            .take()
-            .is_some_and(|pending| pending == PendingWrite::Text(observed_text.to_owned()))
+        matches!(
+            self.pending.take(),
+            Some(PendingWrite::Text(expected)) if expected == observed_text
+        )
     }
 
     pub fn should_suppress_image(&mut self, observed_hash: &str) -> bool {
-        self.pending
-            .take()
-            .is_some_and(|pending| pending == PendingWrite::Image(observed_hash.to_owned()))
+        matches!(
+            self.pending.take(),
+            Some(PendingWrite::Image(expected)) if expected == observed_hash
+        )
     }
 
     pub fn cancel(&mut self) {
