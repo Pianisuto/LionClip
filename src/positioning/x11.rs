@@ -104,6 +104,53 @@ pub fn place_near_pointer(
     })
 }
 
+/// Whether the popup's surface still owns the X keyboard focus.
+///
+/// A keyboard grab — a desktop shortcut being pressed, a menu opening —
+/// deactivates the toplevel without taking the input focus away from it, while
+/// another window taking over does move the focus. Telling those apart is what
+/// keeps the popup open while its own shortcut is pressed.
+pub fn holds_keyboard_focus(window: &adw::ApplicationWindow) -> Result<bool, PositionError> {
+    let surface = window
+        .surface()
+        .and_then(|surface| surface.downcast::<X11Surface>().ok())
+        .ok_or(PositionError::SurfaceUnavailable)?;
+    let xid: u32 = surface
+        .xid()
+        .try_into()
+        .map_err(|_| PositionError::SurfaceUnavailable)?;
+
+    let (connection, _) = x11rb::connect(None).map_err(|_| PositionError::Connection)?;
+    let focus = connection
+        .get_input_focus()
+        .map_err(|_| PositionError::Query)?
+        .reply()
+        .map_err(|_| PositionError::Query)?
+        .focus;
+    if focus == xid {
+        return Ok(true);
+    }
+
+    // The focus usually sits on a descendant of the toplevel, and a window
+    // manager may also reparent the toplevel into a frame.
+    let mut candidate = focus;
+    for _ in 0..8 {
+        let tree = connection
+            .query_tree(candidate)
+            .map_err(|_| PositionError::Query)?
+            .reply()
+            .map_err(|_| PositionError::Query)?;
+        if tree.parent == 0 || tree.parent == tree.root {
+            return Ok(false);
+        }
+        if tree.parent == xid {
+            return Ok(true);
+        }
+        candidate = tree.parent;
+    }
+    Ok(false)
+}
+
 /// Records the placement as a user-specified position in `WM_NORMAL_HINTS`.
 ///
 /// A window manager places a window it has not managed yet by its own policy

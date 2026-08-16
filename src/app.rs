@@ -80,15 +80,25 @@ impl AppState {
         );
         let writer: ClipboardWriter = clipboard_service.writer();
 
-        let popup = Rc::new(popup::build(application, history.clone(), {
-            let history = history.clone();
+        let positioner = Positioner::new(&diagnostics);
+        let popup = Rc::new(popup::build(
+            application,
+            history.clone(),
+            {
+                let history = history.clone();
 
-            move |id| {
-                if let Some(item) = history.borrow().item(id) {
-                    writer.restore_text(item.text());
+                move |id| {
+                    if let Some(item) = history.borrow().item(id) {
+                        writer.restore_text(item.text());
+                    }
                 }
-            }
-        }));
+            },
+            {
+                let positioner = positioner.clone();
+
+                move |window| positioner.holds_keyboard_focus(window)
+            },
+        ));
 
         *history_changed.borrow_mut() = Some(Box::new({
             let popup = popup.clone();
@@ -103,46 +113,52 @@ impl AppState {
         Some(Self {
             history,
             popup,
-            positioner: Positioner::new(&diagnostics),
+            positioner,
             _clipboard_service: clipboard_service,
             _hold: application.hold(),
         })
     }
 
     fn show_popup(&self) {
+        if self.popup.window.is_visible() {
+            // Already open: leave it exactly where it is. Presenting a window
+            // that is already on screen lets the compositor lay the toplevel
+            // out again, which reads as the popup jumping.
+            self.popup.focus_search();
+            return;
+        }
+
         // Render the final content first, so both placements below measure the
         // popup the user is about to see.
         self.popup.prepare();
 
-        if !self.popup.window.is_visible() {
-            // Nothing may be visible before the popup sits at the pointer, and
-            // the window keeps the frame it was hidden with, so hide the
-            // content and place the surface while it is still unmapped.
-            self.popup.window.set_opacity(0.0);
-            // Realizing first gives even the very first open a surface to
-            // place before it is mapped.
-            gtk::prelude::WidgetExt::realize(&self.popup.window);
-            // Placement runs on its own X connection, so a still-pending unmap
-            // from a previous open could otherwise be processed after this
-            // move and leave the popup at its old position.
-            if let Some(display) = gdk::Display::default() {
-                display.sync();
-            }
-            let anchor = self.positioner.place(&self.popup.window, None).anchor();
-
-            // The surface may not exist yet on the very first open, and its
-            // size is only final once mapped, so place again on the first
-            // frame. That placement is the authoritative one; it reuses the
-            // pointer sample above, because the pointer may have moved on and
-            // the popup must not chase it once opened.
-            let positioner = self.positioner.clone();
-            self.popup.window.add_tick_callback(move |window, _| {
-                let outcome = positioner.place(window, anchor);
-                println!("{}", outcome.log_line());
-                window.set_opacity(1.0);
-                glib::ControlFlow::Break
-            });
+        // Nothing may be visible before the popup sits at the pointer, and the
+        // window keeps the frame it was hidden with, so hide the content and
+        // place the surface while it is still unmapped.
+        self.popup.window.set_opacity(0.0);
+        // Realizing first gives even the very first open a surface to place
+        // before it is mapped.
+        gtk::prelude::WidgetExt::realize(&self.popup.window);
+        // Placement runs on its own X connection, so a still-pending unmap from
+        // a previous open could otherwise be processed after this move and
+        // leave the popup at its old position.
+        if let Some(display) = gdk::Display::default() {
+            display.sync();
         }
+        let anchor = self.positioner.place(&self.popup.window, None).anchor();
+
+        // The surface may not exist yet on the very first open, and its size is
+        // only final once mapped, so place again on the first frame. That
+        // placement is the authoritative one; it reuses the pointer sample
+        // above, because the pointer may have moved on and the popup must not
+        // chase it once opened.
+        let positioner = self.positioner.clone();
+        self.popup.window.add_tick_callback(move |window, _| {
+            let outcome = positioner.place(window, anchor);
+            println!("{}", outcome.log_line());
+            window.set_opacity(1.0);
+            glib::ControlFlow::Break
+        });
 
         self.popup.present();
     }

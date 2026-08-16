@@ -316,7 +316,16 @@ leave activation to the popup, anything else keeps it.
 
 ### Focus-loss behavior
 
-The popup hides when the toplevel loses focus. Its own surfaces suppress that
+The popup hides when the toplevel loses focus, and only then: a keyboard grab
+also deactivates the toplevel without the focus ever leaving it, which is what
+pressing the desktop shortcut does while the popup is open. The X11 backend is
+asked whether the popup still owns the keyboard focus, so a grab is ignored and
+a real focus change is not. Backends that cannot answer fall back to the
+toplevel's own activation state.
+
+Invoking the popup while it is already open only returns the focus to the
+search field. It is neither re-placed nor presented again, because presenting a
+window that is already on screen lets the compositor lay it out afresh. Its own surfaces suppress that
 while they are open, counted rather than flagged because the overflow menu hands
 over to the confirmation dialog while it is still closing. Releasing the
 suppression is itself deferred by one main-context turn after a display round

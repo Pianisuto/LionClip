@@ -48,6 +48,10 @@ row:focus-within .lionclip-actions,
 }
 ";
 
+/// Platform probe telling whether the popup still owns the keyboard focus.
+/// `None` when the platform cannot answer.
+type KeyboardFocusProbe = Box<dyn Fn(&adw::ApplicationWindow) -> Option<bool>>;
+
 pub struct HistoryPopup {
     pub window: adw::ApplicationWindow,
     state: Rc<PopupState>,
@@ -65,6 +69,8 @@ struct PopupState {
     clear_action: gio::SimpleAction,
     visible_ids: RefCell<Vec<HistoryItemId>>,
     restore: Box<dyn Fn(HistoryItemId)>,
+    /// Answering `None` falls back to trusting the toplevel's own state.
+    keeps_keyboard_focus: KeyboardFocusProbe,
     /// Number of the popup's own surfaces (overflow menu, confirmation dialog)
     /// that currently own the focus, so the popup does not hide itself before
     /// the interaction it was opened for can complete. A count rather than a
@@ -83,6 +89,7 @@ pub fn build(
     application: &adw::Application,
     history: Rc<RefCell<TextHistory>>,
     on_restore: impl Fn(HistoryItemId) + 'static,
+    keeps_keyboard_focus: impl Fn(&adw::ApplicationWindow) -> Option<bool> + 'static,
 ) -> HistoryPopup {
     let window = adw::ApplicationWindow::builder()
         .application(application)
@@ -193,6 +200,7 @@ pub fn build(
         clear_action: clear_action.clone(),
         visible_ids: RefCell::new(Vec::new()),
         restore: Box::new(on_restore),
+        keeps_keyboard_focus: Box::new(keeps_keyboard_focus),
         suppression_depth: Cell::new(0),
         deferred_hide_check: Cell::new(false),
         updating_search: Cell::new(false),
@@ -308,6 +316,12 @@ impl HistoryPopup {
 
     pub fn present(&self) {
         self.window.present();
+        self.state.focus_search();
+    }
+
+    /// Puts the keyboard focus back on the search field of an already open
+    /// popup, without presenting the window again.
+    pub fn focus_search(&self) {
         self.state.focus_search();
     }
 }
@@ -589,6 +603,12 @@ impl PopupState {
 
     /// Single decision point for the auto-hide: the popup hides when the
     /// toplevel is inactive and none of the popup's own surfaces is open.
+    ///
+    /// A keyboard grab also deactivates the toplevel, without the focus ever
+    /// leaving it — pressing the desktop shortcut while the popup is open does
+    /// exactly that, and hiding on it made the popup close and reopen at the
+    /// new pointer position. So a deactivation only counts when the popup has
+    /// really lost the keyboard focus.
     fn hide_if_inactive(&self) {
         if self.window.is_active() {
             self.deferred_hide_check.set(false);
@@ -596,6 +616,9 @@ impl PopupState {
         }
         if self.auto_hide_suppressed() {
             self.deferred_hide_check.set(true);
+            return;
+        }
+        if (self.keeps_keyboard_focus)(&self.window) == Some(true) {
             return;
         }
         self.hide();

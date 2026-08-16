@@ -165,6 +165,18 @@ impl Positioner {
     }
 }
 
+impl Positioner {
+    /// Whether the popup still owns the keyboard focus, when the platform can
+    /// answer that. `None` means the question is not answerable on this
+    /// backend, and the caller should fall back to the toplevel's own state.
+    pub fn holds_keyboard_focus(&self, window: &adw::ApplicationWindow) -> Option<bool> {
+        match self.backend {
+            DisplayBackend::X11 => x11::holds_keyboard_focus(window).ok(),
+            DisplayBackend::Wayland | DisplayBackend::Unknown => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum X11PathStatus {
     Working,
