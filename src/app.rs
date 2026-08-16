@@ -89,7 +89,7 @@ impl AppState {
             display.clipboard(),
             history.clone(),
             history_changed.clone(),
-            paths.clone(),
+            paths,
         );
         let writer: ClipboardWriter = clipboard_service.writer();
 
@@ -97,7 +97,6 @@ impl AppState {
         let popup = Rc::new(popup::build(
             application,
             history.clone(),
-            paths.clone(),
             {
                 let history = history.clone();
 
