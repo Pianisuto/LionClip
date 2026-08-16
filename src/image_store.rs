@@ -473,7 +473,7 @@ mod tests {
         let pixbuf = Pixbuf::new(Colorspace::Rgb, false, 8, 320, 200).unwrap();
         pixbuf.fill(0x996633ff);
         let bytes = pixbuf
-            .save_to_bufferv("jpeg", &["quality"], &["90"])
+            .save_to_bufferv("jpeg", &[("quality", "90")])
             .unwrap();
         let stored = process_and_store(&storage.paths, ImageMime::Jpeg, bytes.clone()).unwrap();
         let original = blob_path(&storage.paths, &stored.image).unwrap();

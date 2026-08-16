@@ -32,27 +32,27 @@ impl ClipboardWriter {
             eprintln!("lionclip: image restore failed stage=invalid-blob-key");
             return;
         };
-        let clipboard = self.clipboard.clone();
-        let suppression = self.suppression.clone();
-        let content_hash = image.content_hash().to_owned();
-        let mime_type = image.mime_type();
 
-        glib::MainContext::default().spawn_local(async move {
-            let bytes = match gio::spawn_blocking(move || fs::read(path)).await {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(_)) | Err(_) => {
-                    eprintln!("lionclip: image restore failed stage=blob-read");
-                    return;
-                }
-            };
-            let bytes = glib::Bytes::from_owned(bytes);
-            let provider = gdk::ContentProvider::for_bytes(mime_type.as_str(), &bytes);
-            suppression.borrow_mut().arm_image(&content_hash);
-            if clipboard.set_content(Some(&provider)).is_err() {
-                suppression.borrow_mut().cancel();
-                eprintln!("lionclip: image restore failed stage=clipboard-set");
+        // Restoration must complete before the popup closes: otherwise a fast
+        // Ctrl+V can still see the previous clipboard while an async file read is
+        // pending. This reads only the bounded compressed blob (max 25 MiB); it
+        // never decodes full-resolution pixels on the GTK thread.
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                eprintln!("lionclip: image restore failed stage=blob-read");
+                return;
             }
-        });
+        };
+        let bytes = glib::Bytes::from_owned(bytes);
+        let provider = gdk::ContentProvider::for_bytes(image.mime_type().as_str(), &bytes);
+        self.suppression
+            .borrow_mut()
+            .arm_image(image.content_hash());
+        if self.clipboard.set_content(Some(&provider)).is_err() {
+            self.suppression.borrow_mut().cancel();
+            eprintln!("lionclip: image restore failed stage=clipboard-set");
+        }
     }
 }
 
