@@ -261,8 +261,13 @@ impl AppState {
                 // The mapped size is final here, so this placement is the
                 // authoritative one; it reuses the pointer sample of the
                 // placement made before mapping.
+                let started = Instant::now();
                 let outcome = positioner.place(window, pending_anchor.get());
-                println!("{}", outcome.log_line());
+                println!(
+                    "{} map_place_us={}",
+                    outcome.log_line(),
+                    started.elapsed().as_micros()
+                );
                 window.set_opacity(1.0);
             }
         });
@@ -320,14 +325,23 @@ impl AppState {
             return;
         }
 
+        // Every step below runs on the GTK main thread and several of them
+        // are synchronous X round trips, so each is timed separately: this
+        // is the stretch between the shortcut being pressed and the popup
+        // appearing, and anything slow here is felt directly.
+        let started = Instant::now();
+
         // Captured first, while the popup is confirmed not visible: the
         // target is whatever held X input focus right before LionClip
         // opened, not whatever ends up focused after it closes.
         self.pending_paste_target.set(self.paste.capture_target());
+        let capture_target = started.elapsed();
 
         // Render the final content first, so both placements below measure the
         // popup the user is about to see.
+        let phase = Instant::now();
         self.popup.prepare();
+        let prepare = phase.elapsed();
 
         // Nothing may be visible before the popup sits at the pointer, and the
         // window keeps the frame it was hidden with, so hide the content and
@@ -335,17 +349,38 @@ impl AppState {
         self.popup.window.set_opacity(0.0);
         // Realizing first gives even the very first open a surface to place
         // before it is mapped.
+        let phase = Instant::now();
         gtk::prelude::WidgetExt::realize(&self.popup.window);
+        let realize = phase.elapsed();
         // Placement runs on its own X connection, so a still-pending unmap from
         // a previous open could otherwise be processed after this move and
         // leave the popup at its old position.
+        let phase = Instant::now();
         if let Some(display) = gdk::Display::default() {
             display.sync();
         }
+        let display_sync = phase.elapsed();
+
+        let phase = Instant::now();
         self.pending_anchor
             .set(self.positioner.place(&self.popup.window, None).anchor());
+        let place = phase.elapsed();
 
+        let phase = Instant::now();
         self.popup.present();
+        let present = phase.elapsed();
+
+        println!(
+            "lionclip: popup open capture_target_us={} prepare_us={} realize_us={} \
+             display_sync_us={} place_us={} present_us={} total_us={}",
+            capture_target.as_micros(),
+            prepare.as_micros(),
+            realize.as_micros(),
+            display_sync.as_micros(),
+            place.as_micros(),
+            present.as_micros(),
+            started.elapsed().as_micros()
+        );
     }
 }
 

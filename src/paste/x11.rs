@@ -174,42 +174,52 @@ fn attempt_paste_on(display: Option<&str>, target: PasteTarget) -> bool {
         return false;
     }
 
-    // Any number of clients may independently select FocusChangeMask on the
-    // same window, so this cannot disturb the target's own event handling.
-    if connection
-        .change_window_attributes(
-            target.xid,
-            &ChangeWindowAttributesAux::new().event_mask(EventMask::FOCUS_CHANGE),
-        )
-        .ok()
-        .and_then(|cookie| cookie.check().ok())
-        .is_none()
-    {
-        eprintln!("lionclip: auto-paste failed stage=select-focus-events");
-        return false;
-    }
+    // Hiding the popup already makes the window manager hand focus back to
+    // the target, and in practice that has landed by the time this runs. So
+    // ask first, and only try to activate a window that is not already
+    // focused: telling a compositor to activate the window it just activated
+    // is not free, it makes it run a whole activation cycle whose visible
+    // cost lands on the popup the user is watching disappear.
+    let already_focused = holds_focus(&connection, root, target.xid);
 
-    if !request_activation(&connection, root, target.xid) {
-        eprintln!("lionclip: auto-paste failed stage=activation-request");
-        return false;
-    }
+    let focus_wait_started = Instant::now();
+    if !already_focused {
+        // Selected before requesting activation, so the confirmation event
+        // cannot be generated before this client is listening for it. Any
+        // number of clients may independently select FocusChangeMask on the
+        // same window, so this cannot disturb the target's own handling.
+        if connection
+            .change_window_attributes(
+                target.xid,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::FOCUS_CHANGE),
+            )
+            .ok()
+            .and_then(|cookie| cookie.check().ok())
+            .is_none()
+        {
+            eprintln!("lionclip: auto-paste failed stage=select-focus-events");
+            return false;
+        }
 
-    // Resolved before the focus wait rather than after it. It depends on
-    // nothing the wait establishes, and the keyboard-mapping reply it needs
-    // is the largest exchange here, so doing it first moves it off the
-    // latency-sensitive stretch between focus landing and the keys arriving
-    // — and overlaps it with the window manager's focus handoff instead.
+        if !request_activation(&connection, root, target.xid) {
+            eprintln!("lionclip: auto-paste failed stage=activation-request");
+            return false;
+        }
+
+        if !wait_for_focus_confirmation(&connection, root, target.xid) {
+            eprintln!("lionclip: auto-paste skipped stage=focus-not-confirmed");
+            return false;
+        }
+    }
+    let focus_wait = focus_wait_started.elapsed();
+
+    // Depends on nothing the focus handling above establishes, and the
+    // keyboard-mapping reply it needs is the largest exchange here, so it
+    // stays off the stretch between focus landing and the keys arriving.
     let Some(keys) = paste_keys(&connection) else {
         eprintln!("lionclip: auto-paste failed stage=keycode-lookup");
         return false;
     };
-
-    let focus_wait_started = Instant::now();
-    if !wait_for_focus_confirmation(&connection, root, target.xid) {
-        eprintln!("lionclip: auto-paste skipped stage=focus-not-confirmed");
-        return false;
-    }
-    let focus_wait = focus_wait_started.elapsed();
 
     if !synthesize_ctrl_v(&connection, root, keys) {
         eprintln!("lionclip: auto-paste failed stage=key-synthesis");
@@ -580,9 +590,18 @@ mod xvfb_tests {
         let target =
             capture_target_for_test(&xvfb.display).expect("target window should be captured");
         assert_eq!(target.xid, window);
+
         connection.sync().unwrap();
 
         // No focus change happens between here and the paste attempt.
+        //
+        // That an already-focused target is also not sent a redundant
+        // activation request is deliberately *not* asserted here: X only
+        // emits focus events when focus actually changes, so re-focusing an
+        // already-focused window is a protocol no-op that leaves nothing to
+        // observe. The cost that motivates skipping it is the compositor's
+        // reaction to `_NET_ACTIVE_WINDOW`, and Xvfb has no compositor. See
+        // `docs/PHASE6_VALIDATION.md` for the real-session check.
         let started = Instant::now();
         assert!(attempt_paste_for_test(&xvfb.display, target));
         assert!(

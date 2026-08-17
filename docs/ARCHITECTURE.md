@@ -598,11 +598,17 @@ Every step either confirms real state or gives up; nothing assumes success:
 
 1. the target's existence is re-checked at paste time, not just at capture
    time — a destroyed target fails safe;
-2. activation is requested through both the standard `_NET_ACTIVE_WINDOW`
-   EWMH message and a direct `SetInputFocus` reinforcement, because this is
-   only ever asked to hand focus back to a window LionClip itself observed
-   holding it moments earlier — the specific case focus-stealing prevention
-   exists to allow, not the case it exists to block;
+2. activation is requested **only when the target is not already focused**.
+   Hiding the popup already makes the window manager hand focus back, and in
+   practice it has by the time this runs, so the request is usually
+   unnecessary — and not free: telling a compositor to activate the window
+   it just activated makes it run a whole activation cycle, whose visible
+   cost lands on the popup the user is watching disappear. When it *is*
+   needed, it goes through both the standard `_NET_ACTIVE_WINDOW` EWMH
+   message and a direct `SetInputFocus` reinforcement, and only ever to hand
+   focus back to a window LionClip itself observed holding it moments
+   earlier — the specific case focus-stealing prevention exists to allow,
+   not the case it exists to block;
 3. key synthesis only runs once real server state confirms the target owns
    the keyboard focus — either a `GetInputFocus` query already reporting it
    (or one of its descendants, since an application's focus normally sits on

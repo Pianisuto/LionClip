@@ -8,7 +8,7 @@ everything that needs a real desktop. Read `AGENTS.md` and
 
 ## Verified automatically
 
-`cargo test --all-features` (105 tests) covers:
+`cargo test --all-features` (106 tests) covers:
 
 - **Settings persistence** — defaults match the schema; each setting
   persists across reads; the history-limit setter snaps an out-of-range value
@@ -127,25 +127,34 @@ Run on the target Zorin GNOME/X11 machine, from the installed package
     `Enter` — the text must land in that exact application, not wherever
     focus happened to end up. Repeat with mouse click selection.
 11. Repeat step 10 for an image item pasted into an image-capable app.
-12. Toggle the setting off and on again without restarting LionClip; confirm
+12. **Redundant activation.** Select an item with auto-paste enabled and
+    watch how long the popup takes to disappear, then disable the setting
+    and repeat: the two should feel the same. LionClip skips the activation
+    request whenever the target already holds focus, which it normally does
+    by then because hiding the popup already returned it — asking the
+    compositor to activate an already-active window costs a visible
+    activation cycle. This is deliberately not covered by the Xvfb tests: X
+    emits no focus event when focus does not actually change, so the
+    protocol side is a no-op and the whole cost lives in the compositor.
+13. Toggle the setting off and on again without restarting LionClip; confirm
     the very next selection immediately reflects the new state.
-13. Open the popup, then close the target application before selecting an
+14. Open the popup, then close the target application before selecting an
     item: the selection must restore the clipboard and close the popup, and
     must **not** paste into whatever window happens to be focused instead.
-14. Open the popup over app A, deliberately click into a different app B
+15. Open the popup over app A, deliberately click into a different app B
     while the popup is still open (if focus-follows-click permits), then
     select an item: it must not paste into B.
-15. Confirm `Up`/`Down` navigation, clicking *Pin*, clicking *Delete*,
+16. Confirm `Up`/`Down` navigation, clicking *Pin*, clicking *Delete*,
     typing in search, and opening the overflow menu or Preferences from the
     popup never trigger a paste — only `Enter` or clicking a row activates
     it.
-16. Confirm nothing under `journalctl --user -b | grep lionclip` contains
+17. Confirm nothing under `journalctl --user -b | grep lionclip` contains
     clipboard content, search text, or window titles; technical IDs
     (`sent=true`/`sent=false`, stage names) are expected.
 
 ### Wayland session
 
-17. Log into a Wayland session (if available) and open Preferences: the
+18. Log into a Wayland session (if available) and open Preferences: the
     auto-paste switch must be disabled with the "X11 only" subtitle, every
     other setting must work normally, and selecting a history item must
     restore the clipboard without attempting to synthesize a paste or
