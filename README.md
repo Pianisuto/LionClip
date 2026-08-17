@@ -79,6 +79,10 @@ selected; press `Super+V` again to close it.
 - **clear** — the overflow menu next to the search field clears unpinned items
 - **images** — screenshots and copied PNG/JPEG images appear as thumbnails and
   are restored as the original image
+- **preferences** — the overflow menu's *Preferences* item opens a small
+  settings window: history limit, save-images, pause recording,
+  automatically paste selected items (X11 only), start at login, and clear
+  history
 
 From a terminal or a script:
 
@@ -87,10 +91,40 @@ lionclip           # start the resident instance, no popup
 lionclip show      # show the popup
 lionclip hide      # hide the popup, keep running
 lionclip toggle    # show it when hidden, hide it when visible
+lionclip settings  # open (or focus) the preferences window
 ```
 
 Every invocation talks to the one resident instance, so there is never a second
-clipboard monitor.
+clipboard monitor or a second preferences window.
+
+## Preferences
+
+Settings persist through GSettings and apply immediately, without a restart:
+
+- **history limit** — 100/250/500/1000 unpinned items; lowering it evicts the
+  oldest unpinned items (and their stored images) right away, pinned items are
+  never affected;
+- **save copied images** — off stops capturing new images while keeping the
+  ones already in history; a plain-text representation offered alongside an
+  ignored image is still captured;
+- **pause clipboard recording** — stops new captures without disabling
+  restore, search, pin, delete or clear; the popup shows a small "History
+  paused" indicator with a *Resume* button while it is on;
+- **automatically paste selected items** — off by default; when on, choosing
+  a history item also asks the application that was focused before LionClip
+  opened to paste it. Available on X11 only in this release: on Wayland the
+  toggle is disabled and selecting an item only restores the clipboard, the
+  same as with the setting off;
+- **start LionClip at login** — writes or removes a per-user
+  `~/.config/autostart` override on top of the package's system-wide
+  autostart entry; no root needed;
+- **clear history…** — removes all clipboard history, including pinned items
+  and stored images, after a confirmation. The popup's own overflow menu
+  keeps the narrower *Clear Unpinned History…*.
+
+No setting reaches the network. See
+[`docs/PHASE6_VALIDATION.md`](docs/PHASE6_VALIDATION.md) for the manual QA
+checklist and the auto-paste safety design.
 
 ## Upgrade
 
@@ -137,7 +171,8 @@ rm -rf ~/.local/share/lionclip
 
 ## Status
 
-**Early development / Phase 5 implemented.**
+**Early development / Phase 6 implemented, pending manual validation on the
+target machine for auto-paste.**
 
 Phase 0 validated pointer-relative popup placement on the real target machine:
 Zorin OS with GNOME/X11. Native GNOME Wayland uses a safe compositor-managed
@@ -150,17 +185,24 @@ restarts.
 The popup behaves like a small system surface: type to search instantly, arrows
 to navigate, `Enter` to restore, `Escape` to clear the search and then dismiss,
 `Delete` to remove an item, `Ctrl+P` to pin, and a restrained overflow menu to
-clear unpinned history. Pinned items are kept first and are exempt from the
-retention limit.
+clear unpinned history and open Preferences. Pinned items are kept first and
+are exempt from the retention limit.
 
-There are no preferences yet: history limits, retention and a pause control are
-Phase 6.
+A native Libadwaita Preferences window (see [Preferences](#preferences) above)
+covers history limit, save-images, pause recording, automatic paste and
+start-at-login, plus a destructive clear-history control. Settings persist
+through GSettings; retention period by wall-clock days was deliberately left
+out because the history model only has logical sequences, not real
+timestamps, and manufacturing fake ones just for that would be worse than not
+having the feature.
 
 See [`docs/PHASE0_VALIDATION.md`](docs/PHASE0_VALIDATION.md) for native build
 dependencies, the recorded Phase 0 result, positioning diagnostics, and the
-optional Wayland/XWayland test matrix, and
+optional Wayland/XWayland test matrix,
 [`docs/PHASE5_VALIDATION.md`](docs/PHASE5_VALIDATION.md) for the desktop
-integration and packaging test script.
+integration and packaging test script, and
+[`docs/PHASE6_VALIDATION.md`](docs/PHASE6_VALIDATION.md) for the preferences
+and auto-paste manual QA checklist.
 
 ## Product principles
 

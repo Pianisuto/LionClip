@@ -287,6 +287,11 @@ Phase 6, and no Flatpak/Snap/AppImage path was added.
 
 ## Phase 6 — Preferences and privacy controls
 
+**Status: implemented, pending manual validation on the target Zorin
+GNOME/X11 machine.** See `docs/PHASE6_VALIDATION.md` for what automated tests
+cover (including Xvfb-backed X11 auto-paste integration tests) and the manual
+QA checklist for everything that needs a real desktop session.
+
 ### Goal
 
 Expose only settings that real usage has proven useful.
@@ -312,6 +317,73 @@ A compact native settings window, not a second complex application surface.
 - changing limits triggers safe cleanup behavior;
 - destructive controls are clear;
 - no setting exists only for hypothetical future functionality.
+
+### Result
+
+Preferences persist through GSettings (schema
+`io.github.Pianisuto.LionClip`, installed to
+`/usr/share/glib-2.0/schemas`), not a hand-rolled config file: it needed no
+new dependency (`gio` was already linked for application lifecycle), gives
+native change validation and atomic dconf-backed writes, and keeps the same
+`gsettings`/dconf tooling GNOME itself uses available for support and
+debugging. A `build.rs` step compiles the schema into a development copy so
+`cargo run`/`cargo test` work before the package is installed, both resolving
+to the same dconf path as the real install. If no schema can be found or
+compiled anywhere, `SettingsService` falls back to unpersisted in-memory
+defaults rather than crashing, the same way a broken database path already
+degrades to an in-memory `TextHistory`.
+
+`SettingsService` (`src/settings/`) is the single authority: the popup, the
+clipboard/history services and the preferences window all read and write
+through it, never touching `gio::Settings` directly. "Start at login" is
+deliberately not a GSettings key — its effective state is the presence of a
+per-user `~/.config/autostart` override with `Hidden=true` over the
+package's system-wide entry, so the filesystem stays the one source of truth
+instead of risking a GSettings value that disagrees with it.
+
+History limit changes apply retention immediately through the existing
+`TextHistory::enforce_retention` path; a new `clear_all` operation backs the
+Preferences "Clear history" action, distinct from the popup's narrower
+"Clear Unpinned History…", and both bulk-clear operations now bump a
+generation counter that in-flight asynchronous captures (image processing in
+particular, which can span multiple await points) check before inserting, so
+a capture that was already running when a clear ran can no longer make a
+just-cleared item reappear. `save_images` and `recording_paused` are read
+directly by the clipboard capture handler on every clipboard change, with no
+caching and no signal-wiring layer to keep in sync; a paused handler does no
+work at all, not even inspecting offered MIME types.
+
+Auto-paste ("automatically paste selected items into the app you were using
+before LionClip", default off) is implemented as `PasteCoordinator`
+(`src/paste/`), shaped like `Positioner` on purpose: a concrete backend
+selected once from session diagnostics rather than a trait object, since
+there is exactly one real backend (X11) and one degenerate case. It extends
+the existing isolated `x11rb` usage instead of a second X11 stack, and uses
+`x11rb`'s `xtest` Cargo feature for key synthesis — no `xdotool`/`ydotool`
+runtime dependency. The sequence is fail-safe end to end: the paste target
+is captured once, when the popup is shown and confirmed not visible yet
+(never derived from whatever is focused after the popup closes); only
+`Enter`/click activation on a history row can trigger a paste attempt, never
+navigation, pin, delete, search, menu or Preferences; the clipboard restore
+must complete and report success before any paste is attempted; the target's
+existence is re-checked at paste time; activation is requested through both
+`_NET_ACTIVE_WINDOW` and a direct `SetInputFocus` reinforcement; the actual
+key synthesis only runs after a real `FocusIn` event confirms the target
+regained focus, waited for with a bounded (~400 ms) non-blocking poll rather
+than a blind sleep; and every failure path — invalid/destroyed target,
+disabled setting, failed restore, unconfirmed focus — falls back to
+restore-only. On Wayland the setting persists but the switch is disabled
+with an explanatory subtitle, and selecting an item only restores the
+clipboard, exactly like the setting being off.
+
+Deliberately left out: retention by wall-clock days (schema v2 has no real
+timestamps, only logical sequences, and a migration solely to support a
+slider was not justified); a second "delete all data" action distinct from
+"clear history" (clearing history already removes the database contents,
+blobs and thumbnails, and deleting the user's own preferences while the
+process that reads them is still running would be confusing for no real
+benefit); and exposing the 512 MiB aggregate image storage cap as a setting
+(it remains a fixed technical safety backstop, as it was in Phase 4).
 
 ---
 

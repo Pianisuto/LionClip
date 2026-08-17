@@ -68,8 +68,15 @@ src/
 │   ├── mod.rs
 │   ├── x11.rs
 │   └── fallback.rs
+├── paste/
+│   ├── mod.rs
+│   └── x11.rs
 ├── settings/
-│   └── preferences.rs
+│   ├── mod.rs
+│   ├── schema.rs
+│   ├── service.rs
+│   ├── autostart.rs
+│   └── window.rs
 └── storage/
     ├── db.rs
     └── migrations.rs
@@ -398,6 +405,89 @@ the user leaving. If the toplevel went inactive while suppressed, the hide
 condition is re-checked once when the last surface closes, because no further
 `is-active` notification would arrive on its own.
 
+## Settings and preferences
+
+`SettingsService` (`src/settings/`) is the single authority for LionClip
+preferences. The popup, the clipboard/history services and the preferences
+window all read and write through it; nothing else touches `gio::Settings`
+or the autostart override file directly.
+
+### Storage: GSettings, not a hand-rolled config file
+
+Preferences persist through GSettings, schema `io.github.Pianisuto.LionClip`,
+installed to `/usr/share/glib-2.0/schemas`. This needed no new dependency —
+`gio` was already linked for application lifecycle and single-instance
+command handling — and it gives native type/range validation at write time,
+atomic dconf-backed storage, and the same `gsettings`/dconf tooling GNOME
+itself uses for support and debugging. A hand-rolled XDG config file would
+have needed a serialization dependency and its own corrupt-file handling for
+no offsetting benefit on a project already this deep into GLib/GIO.
+
+`src/settings/schema.rs` resolves the compiled schema in order: the schema
+installed on the system (the normal case once packaged), a copy `build.rs`
+compiles from `packaging/schemas/` into `$OUT_DIR` for `cargo run`/`cargo
+test` before install, and finally a copy compiled on the fly into a private
+temp directory as a last resort. All three resolve to the schema's own
+declared `path`, so a development build and a real install read and write
+the same dconf keys. If none of that produces a usable schema —
+`glib-compile-schemas` missing everywhere — `SettingsService` falls back to
+unpersisted in-memory defaults and logs a payload-free diagnostic, the same
+degradation `TextHistory` already applies when the database path is
+unavailable.
+
+"Start at login" is deliberately **not** a GSettings key. Its effective state
+is the presence of a per-user `~/.config/autostart/<app-id>.desktop` override
+containing `Hidden=true`, which is exactly what GNOME's own Startup
+Applications/Tweaks write and read, layered over the package's system-wide
+`/etc/xdg/autostart` entry (`docs/ARCHITECTURE.md`'s Desktop integration
+section below). Storing a second "enabled" boolean in GSettings could
+silently disagree with what the override file actually says, so the
+filesystem stays the one source of truth (`src/settings/autostart.rs`).
+
+### Reacting to changes
+
+Settings are read directly, at the point of use, with no caching and no
+change-notification/signal-wiring layer: the clipboard capture handler calls
+`settings.recording_paused()` and `settings.save_images()` on every clipboard
+change, and the popup calls `settings.recording_paused()` every time it
+rebuilds to decide whether to show its "History paused" indicator. In this
+process, GSettings itself is the only writer these consumers care about, and
+a live read is cheap, so there was nothing a signal would buy beyond
+indirection. The one setting that needs a proactive reaction is `history
+limit`, because nothing else naturally triggers a retention pass: the
+preferences window calls `TextHistory::set_unpinned_limit` directly, which
+runs the existing `enforce_retention` path immediately, the same one that
+already runs after every insert.
+
+### Preferences window
+
+`AdwPreferencesWindow` (`src/settings/window.rs`) is a normal GNOME window,
+built once and reused for the process lifetime: it hides rather than closes
+on the window-close button, exactly like the popup does, so `lionclip
+settings` and the popup's "Preferences" menu item both reuse the same
+instance instead of racing to build a second one or rebuilding UI on every
+invocation. It deliberately does not share anything from `src/popup/`:
+no pointer-relative positioning, no auto-hide on focus loss, no keyboard-grab
+handling. `Behavior`/`History`/`System`/`Data` preference groups map directly
+to the acceptance list in `docs/ROADMAP.md`'s Phase 6 entry; no row exists
+for a setting without a concrete, already-justified use.
+
+### Destructive operations and in-flight captures
+
+The preferences "Clear history" action calls a new `TextHistory::clear_all`,
+distinct from the popup's narrower `clear_unpinned`: it removes pinned and
+unpinned items alike, including their stored images. Both bulk-clear
+operations bump a `generation` counter on `TextHistory`. Image capture in
+particular can span several `await` points (format negotiation, the bounded
+read, blocking-pool decode/store) during which a clear could run to
+completion; the clipboard service snapshots the generation before a capture
+starts and compares it again immediately before the final `record`/
+`record_image` call, discarding the capture (and queuing its blob for
+cleanup through the existing `ImageCleanupCoordinator`) if a clear happened
+in between. Without this, a capture that was already in flight when the user
+cleared history could otherwise insert itself right after the clear that was
+supposed to remove it.
+
 ## Positioning
 
 This is the primary architecture risk.
@@ -464,6 +554,80 @@ Phase 0 established these backend outcomes:
 The primary X11 result satisfies the V1 placement requirement. Phase 1 is not
 blocked on Wayland or XWayland validation. Do not add a GNOME Shell extension
 without an explicit future roadmap decision.
+
+## Auto-paste
+
+Phase 6 adds an opt-in (default off) setting: after restoring the selected
+history item to the clipboard, also ask the application that was focused
+before LionClip opened to paste it. `PasteCoordinator` (`src/paste/`) is
+shaped like `Positioner` on purpose — a concrete backend picked once from
+`SessionDiagnostics` and dispatched to, not a trait object — because there is
+exactly one real backend (X11) and one degenerate "unavailable" case, the
+same shape positioning already uses for the same reason. It extends the
+existing isolated `x11rb` usage (`src/positioning/x11.rs`) rather than
+building a second X11 stack: per-call connections, no long-lived state, and
+key synthesis through `x11rb`'s `xtest` Cargo feature rather than shelling
+out to `xdotool`/`ydotool`.
+
+### The decision is pure; the mechanism is not
+
+`paste::decide(auto_paste_enabled, has_target, restore_succeeded) ->
+SelectionBehavior` is a free function with no GTK or X11 dependency,
+covering: auto-paste off; on with a captured target and a successful
+restore; on without a captured target; and a failed restore, which never
+pastes regardless of the other two. Only `Enter`/click activation on a
+history row calls it — navigation, pin, delete, search, the overflow menu
+and opening Preferences never do, mirroring how the popup already isolates
+"activation" from every other row interaction (see Popup UI above).
+
+### Target capture: when the popup opens, not when it closes
+
+The paste target is captured once, synchronously, at the same point the
+popup's own placement pointer sample is taken — before the popup's window is
+confirmed visible, so the query cannot observe LionClip's own window as
+focused. It is *not* derived from whatever ends up focused after the popup
+closes, which could be a different application entirely. Capture walks
+`GetInputFocus` up through `QueryTree` parents to the top-level a window
+manager would frame, the same tree-walk idiom `holds_keyboard_focus` in
+`src/positioning/x11.rs` already uses for a related but distinct question
+(whether the popup itself still owns focus).
+
+### Fail-safe by construction
+
+Every step either confirms real state or gives up; nothing assumes success:
+
+1. the target's existence is re-checked at paste time, not just at capture
+   time — a destroyed target fails safe;
+2. activation is requested through both the standard `_NET_ACTIVE_WINDOW`
+   EWMH message and a direct `SetInputFocus` reinforcement, because this is
+   only ever asked to hand focus back to a window LionClip itself observed
+   holding it moments earlier — the specific case focus-stealing prevention
+   exists to allow, not the case it exists to block;
+3. key synthesis only runs after a real `FocusIn` event confirms the target
+   actually regained focus, polled non-blocking with a short pause between
+   attempts and a bounded ~400 ms deadline — the event is the confirmation,
+   the pause is only how often the server is asked, and a timeout fails safe
+   rather than guessing;
+4. Control and V key presses are synthesized through XTEST, with every
+   already-pressed key unconditionally released even if a later step fails,
+   so a partial failure can never leave a modifier logically stuck at the X
+   server;
+5. the whole validate/activate/confirm/synthesize sequence runs off the GTK
+   main thread (`gio::spawn_blocking`, the same pattern image processing
+   already uses), because it can take up to the confirmation deadline.
+
+None of this ever falls back to placing the popup, hiding it, sleeping a
+fixed amount and hoping a key combination landed in the right window.
+
+### Wayland
+
+`PasteCoordinator::is_available()` gates on the same `is_x11()` GDK-backend
+check positioning already uses to decide whether to attempt its own X11
+path. On Wayland the preferences switch is disabled with an explanatory
+subtitle rather than hidden, so a persisted preference from an earlier X11
+session stays visible; selecting a history item still restores the
+clipboard exactly as it does with the setting off, and no paste is
+attempted.
 
 ## Search
 
@@ -568,8 +732,17 @@ file list are all visible in one place.
 /usr/share/icons/hicolor/scalable/apps/<app-id>.svg
 /usr/share/icons/hicolor/{16,24,32,48,64,128,256}x*/apps/<app-id>.png
 /usr/share/metainfo/<app-id>.metainfo.xml
+/usr/share/glib-2.0/schemas/<app-id>.gschema.xml
 /usr/share/doc/lionclip/{copyright,README.Debian,changelog.Debian.gz}
 ```
+
+Only the schema *source* is packaged, never a compiled `gschemas.compiled`:
+that file is the merge of every schema installed on the system, so shipping
+one of our own would clobber every other application's compiled schemas.
+`postinst`/`postrm` instead run `glib-compile-schemas
+/usr/share/glib-2.0/schemas` on configure/remove/purge, the same
+best-effort, tool-presence-guarded pattern already used to refresh the icon
+cache and the desktop database.
 
 Runtime dependencies are not written by hand. `dpkg-shlibdeps` reads the built
 binary and produces the versioned list — GTK4, Libadwaita, GLib, GDK-Pixbuf,
