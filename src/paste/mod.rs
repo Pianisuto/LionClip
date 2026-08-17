@@ -5,7 +5,7 @@
 //! This mirrors `src/positioning/mod.rs`'s shape on purpose: a small,
 //! concrete coordinator picks a backend once from session diagnostics, and
 //! all platform-specific work lives in an isolated submodule so it cannot
-//! leak into UI code. There is exactly one real backend (X11) and one
+//! leak into UI code. There is exactly one real backend (native X11) and one
 //! degenerate "unavailable" case, which is why this is a concrete `enum`
 //! dispatch rather than a trait object.
 
@@ -59,7 +59,7 @@ pub struct PasteCoordinator {
 impl PasteCoordinator {
     pub fn new(diagnostics: &SessionDiagnostics) -> Self {
         Self {
-            backend: if diagnostics.is_x11() {
+            backend: if diagnostics.supports_auto_paste() {
                 Backend::X11
             } else {
                 Backend::Unavailable
@@ -89,7 +89,7 @@ impl PasteCoordinator {
 
     /// Restores focus to `target` and, only once the server confirms the
     /// target still owns it, synthesizes Ctrl+V. `own_window` is LionClip's
-    /// own popup, so the backend can tell "our window is still closing" from
+    /// own popup, so the backend can tell "our popup is still closing" from
     /// "the user moved to another application" and decline to steal focus
     /// back in the latter case. Calls `on_done(true)` only if the key
     /// combination was actually sent; every failure path (destroyed target,
