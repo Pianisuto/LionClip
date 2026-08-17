@@ -331,6 +331,12 @@ impl HistoryPopup {
     pub fn focus_search(&self) {
         self.state.focus_search();
     }
+
+    /// Takes the popup off screen and keeps the process resident, exactly like
+    /// `Escape` and the auto-hide do.
+    pub fn hide(&self) {
+        self.state.hide();
+    }
 }
 
 impl PopupState {

@@ -4,9 +4,10 @@ use std::{
 };
 
 use adw::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, gio, gio::prelude::ApplicationCommandLineExt, glib};
 
 use crate::{
+    cli::{self, Answer, Command, PopupIntent},
     clipboard::{ClipboardService, ClipboardWriter, HistoryChangedCallback},
     history::{HistoryPayload, TextHistory},
     image_cleanup::ImageCleanupCoordinator,
@@ -16,29 +17,74 @@ use crate::{
     unix_signals,
 };
 
-const APPLICATION_ID: &str = "io.github.Pianisuto.LionClip";
-
 pub fn run() -> glib::ExitCode {
-    let application = adw::Application::builder()
-        .application_id(APPLICATION_ID)
-        .build();
-    let state = Rc::new(RefCell::new(None));
+    match cli::parse(std::env::args_os().skip(1)) {
+        Ok(_) => run_application(),
+        Err(answer) => report(&answer),
+    }
+}
 
-    application.connect_activate({
+/// Prints what the process can answer on its own and turns it into an exit
+/// code. Errors go to stderr so `lionclip --help` stays pipeable.
+fn report(answer: &Answer) -> glib::ExitCode {
+    if answer.is_error() {
+        eprint!("{}", answer.text());
+    } else {
+        print!("{}", answer.text());
+    }
+    glib::ExitCode::from(answer.exit_code())
+}
+
+/// Runs the command through GIO's single-instance machinery.
+///
+/// The first process to own the application ID becomes the resident instance
+/// and builds the one clipboard monitor in `startup`; every later invocation
+/// finds the name taken, hands its command line to that instance over D-Bus and
+/// exits. So repeated `lionclip toggle` presses are commands to one process,
+/// not new processes.
+///
+/// `activate` is deliberately left unconnected: the command line is the only
+/// way in, which is what keeps autostart from showing the popup at login.
+fn run_application() -> glib::ExitCode {
+    let application = adw::Application::builder()
+        .application_id(cli::APPLICATION_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+    let state: Rc<RefCell<Option<AppState>>> = Rc::new(RefCell::new(None));
+
+    application.connect_startup({
         let state = state.clone();
 
         move |application| {
-            if state.borrow().is_none() {
-                let Some(new_state) = AppState::new(application) else {
-                    eprintln!("lionclip: graphical display or data path unavailable");
-                    application.quit();
-                    return;
-                };
-                *state.borrow_mut() = Some(new_state);
-            }
+            *state.borrow_mut() = AppState::new(application);
+        }
+    });
+    application.connect_command_line({
+        let state = state.clone();
 
-            if let Some(state) = state.borrow().as_ref() {
-                state.show_popup();
+        move |application, command_line| {
+            let arguments = command_line.arguments();
+
+            match cli::parse(arguments.iter().skip(1)) {
+                Ok(command) => match state.borrow().as_ref() {
+                    Some(state) => {
+                        state.apply(command);
+                        glib::ExitCode::SUCCESS
+                    }
+                    // Only the process that just failed to build its own state
+                    // can land here: an instance without state never holds the
+                    // application alive, so it is never the one a later
+                    // invocation reaches. Reporting locally is therefore
+                    // reporting to the caller.
+                    None => {
+                        eprintln!("lionclip: graphical display or data path unavailable");
+                        application.quit();
+                        glib::ExitCode::FAILURE
+                    }
+                },
+                // Unreachable in practice, because every process answers these
+                // before it registers, but the remote argv is still input.
+                Err(answer) => report(&answer),
             }
         }
     });
@@ -161,6 +207,15 @@ impl AppState {
             _clipboard_service: clipboard_service,
             _hold: application.hold(),
         })
+    }
+
+    /// Applies one command to the popup of the resident instance.
+    fn apply(&self, command: Command) {
+        match command.intent(self.popup.window.is_visible()) {
+            PopupIntent::Show => self.show_popup(),
+            PopupIntent::Hide => self.popup.hide(),
+            PopupIntent::Leave => {}
+        }
     }
 
     fn show_popup(&self) {
