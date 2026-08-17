@@ -42,7 +42,7 @@ Unless a roadmap phase explicitly changes this decision, use:
 - GLib/GIO for application lifecycle and single-instance behavior;
 - GDK clipboard APIs for clipboard interaction where viable;
 - SQLite for persistence once persistence is introduced;
-- `x11rb` only inside the isolated, validated X11 positioning backend and related XWayland experiments.
+- `x11rb` only inside isolated platform-specific X11 backends such as validated positioning and the explicit native-X11 auto-paste feature.
 
 Avoid Electron, Tauri, webviews, Node runtimes, Python daemons, or a second UI toolkit.
 
@@ -136,7 +136,7 @@ Rules:
 - no network dependency for core functionality;
 - never log clipboard contents in normal logs;
 - diagnostic logs should describe types/sizes/events, not sensitive payloads;
-- do not implement auto-paste by synthesizing keyboard events in V1;
+- auto-paste/input synthesis must remain explicit opt-in, default off, isolated to the validated native X11 session, and fail safe; do not enable it on Wayland/XWayland without a separately designed and validated safe backend;
 - keep persistence paths inside standard XDG user directories;
 - pinned and retained content must be deletable by the user.
 
@@ -163,7 +163,7 @@ Do not opportunistically add:
 - shell scripting engines;
 - clipboard sync between machines;
 - content transformation actions;
-- automatic paste injection;
+- expansion of auto-paste/input synthesis beyond the explicit default-off native-X11 behavior approved for Phase 6;
 - unrelated settings.
 
 If you notice a useful future improvement, mention it in the PR summary instead of silently expanding scope.
