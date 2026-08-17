@@ -219,10 +219,12 @@ history was added.
 
 ## Phase 5 — Zorin/GNOME integration and packaging
 
-**Status: implemented, pending the packaged install QA pass on the target Zorin
-machine.** Command routing, single instance, toggle behavior and the desktop
-files were exercised on the real Zorin GNOME/X11 session; installing the `.deb`
-itself needs a password and is in `docs/PHASE5_VALIDATION.md`.
+**Status: implemented and validated from the installed package on the target
+Zorin GNOME/X11 machine.** Command routing, single instance, toggle behavior,
+desktop integration, clipboard capture and the whole
+install/reinstall/upgrade/remove/purge sequence were exercised there; the
+remaining checks are the ones that need eyes on the screen or a real keypress,
+listed in `docs/PHASE5_VALIDATION.md`.
 
 ### Goal
 

@@ -22,90 +22,88 @@ CI additionally runs `desktop-file-validate` on both desktop files,
 `appstreamcli validate` on the metainfo, a display-free CLI smoke test, the
 `.deb` build, and assertions over the package contents and dependencies.
 
-## Verified on the target session
+## Verified on the target session, from the installed package
 
-Zorin OS, GNOME, X11, two 2560×1440 monitors, `cargo build --release` binary:
+Zorin OS, GNOME, X11, two 2560×1440 monitors. The package was installed with
+`apt install ./lionclip_0.1.0_amd64.deb` and every check below ran against
+`/usr/bin/lionclip`.
+
+### Command surface and popup
 
 | Check | Result |
 | --- | --- |
-| `lionclip` starts resident, no window | 1 process, popup unmapped |
-| `lionclip show` | popup `IsViewable`, placed at the pointer |
-| `lionclip toggle` while visible | popup `IsUnMapped`, no re-placement |
-| `lionclip toggle` while hidden | popup `IsViewable` at the pointer |
-| `lionclip show` while already visible | stays at the same coordinates |
+| Autostart's `Exec=lionclip` | 1 process, popup toplevel not even realized |
+| Launcher entry (`gtk-launch`) while already running | popup `IsViewable`, still 1 process |
+| `lionclip show` | `IsViewable`, placed at the pointer |
+| `lionclip toggle` while visible | `IsUnMapped`, no re-placement |
+| `lionclip toggle` while hidden | `IsViewable` at the pointer |
+| `lionclip show` while already visible | identical coordinates |
 | `lionclip hide`, twice | `IsUnMapped`, no error |
-| 20 rapid `toggle` invocations | ends hidden, still 1 process |
-| bare `lionclip` while already running | exits 0, no second process |
-| `SIGTERM` | process exits, history drained |
-| `--help`, `--version`, bad argument, with `DISPLAY` unset | work, exit 0/0/2 |
-| `WM_CLASS` of the popup | `("lionclip", "lionclip")`, matches `StartupWMClass` |
-| Placement across both monitors | correct monitor chosen, coordinates clamped |
+| 10 toggles at 400 ms, and 10 back to back | correct parity, popup responsive |
+| 30 toggles back to back, 7 runs | always exactly 15 shows, 1 process; see the note below |
+| bare `lionclip` while already running | exits 0, no second process, popup untouched |
+| `SIGTERM` | exits, history drained |
+| `--help`, `--version`, bad argument, `DISPLAY` unset | 0, 0, 2 |
+| popup `WM_CLASS` | `("lionclip","lionclip")`, matches `StartupWMClass` |
+| Placement across both monitors | correct monitor, coordinates clamped |
 
-`lionclip-shortcut` was run against the live session for detection only
-(`status`, and `install` refusing a conflict) and against a stubbed `gsettings`
-for the writing paths: install, reinstall, adopting a shortcut left over from a
-development build, refusing a foreign `Super+V` shortcut, remove, remove again,
-and invalid arguments.
+### Desktop integration
 
-## Manual QA on Zorin GNOME/X11
+| Check | Result |
+| --- | --- |
+| `dpkg -L` | binary, helper, both desktop files, 25 icon paths, metainfo, docs |
+| Permissions on disk | `root:root`, 755 binaries, 644 data, autostart is a conffile |
+| `Gtk.IconTheme` lookup by icon name | resolves at 16/24/32/48/64/128/256 px to the installed PNGs |
+| `Gio.DesktopAppInfo` for the entry | name `LionClip`, icon `io.github.Pianisuto.LionClip`, exec `lionclip show`, `Terminal=false`, not `NoDisplay` |
+| `lionclip-shortcut install` | adopted the existing development-build shortcut in place, left an unrelated custom shortcut alone |
 
-### Clean install
+### Clipboard capture
 
-1. Stop any development build: `pkill -x lionclip`.
-2. Remove a stale development shortcut if you have one:
-   `lionclip-shortcut status` — if it points at a `target/release/lionclip`
-   path, `lionclip-shortcut install` will update it in step 7.
-3. `sudo apt install ./lionclip_0.1.0_amd64.deb`
-4. Confirm the launcher entry: open the app grid and search for "LionClip".
-5. Confirm the icon is the lion tile in the app grid, in the dock and in the
-   *Settings → Apps* list.
-6. Click it. The popup opens near the pointer.
-7. `lionclip-shortcut install` (add `--take-over` if it reports GNOME's
-   notification-list conflict). Confirm with `lionclip-shortcut status`.
+Run against an isolated `XDG_DATA_HOME` so the real history was not touched:
 
-### Behavior
+| Check | Result |
+| --- | --- |
+| Copy known text | stored as a `text` row, exact content |
+| Copy a known PNG | stored as an `image` row; the blob is byte-identical to the source (SHA-256 match, content-addressed name), with a separate generated thumbnail |
+| Restart the process | schema v2, all rows and their kinds survive |
 
-8. Copy text in two different applications, press `Super+V`, confirm both
-   entries, pick one with `Enter`, paste with `Ctrl+V`.
-9. Take a screenshot or copy an image, press `Super+V`, confirm the thumbnail,
-   restore it and paste it into an image-capable application.
-10. Press `Super+V` while the popup is open: it closes, and does not close and
-    reopen at a new position.
-11. Toggle 20–30 times quickly. No flicker, no second window, no stuck popup.
-12. Click away from the popup: it hides.
-13. Search, `Up`/`Down`, `Delete`, `Ctrl+P` to pin, overflow menu to clear
-    unpinned items.
-14. Open the popup with the pointer near each screen edge and on the second
-    monitor, including a monitor at a negative X coordinate if you have one.
-    The popup stays fully on the monitor under the pointer.
-15. Switch the system appearance between light and dark; the popup follows.
+### Package lifecycle
 
-### Autostart and single instance
+One `apt` sequence, checking the binary, the autostart conffile and
+`~/.local/share/lionclip` after every step:
 
-16. Log out and back in. Do not open a terminal.
-17. Copy something, press `Super+V`, confirm the history is there and that
-    entries from before the logout survived.
-18. `pgrep -xc lionclip` must print `1`.
-19. Run `lionclip` in a terminal: it must not create a second process and must
-    not open the popup.
-20. Click the launcher entry while it is running: the popup shows; still one
-    process.
+| Step | Package | Binary | Autostart | User data |
+| --- | --- | --- | --- | --- |
+| reinstall same version | 0.1.0 | present | present | 5 files |
+| upgrade to a rebuilt 0.1.1~qa | 0.1.1~qa | present | present | 5 files |
+| `apt remove` | config-files | absent | **present** | 5 files |
+| reinstall after remove | 0.1.0 | present | present | 5 files |
+| `apt purge` | not installed | absent | absent | **5 files** |
+| final install | 0.1.0 | present | present | 5 files |
 
-### Packaging
+The history inventory (names and sizes) was identical before and after the whole
+sequence: neither `remove` nor `purge` touched a byte of it.
 
-21. Reinstall the same package: `sudo apt install ./lionclip_0.1.0_amd64.deb`.
-    Confirm it succeeds and the running instance is untouched.
-22. Rebuild the package (`packaging/deb/build.sh`) and install the rebuilt file
-    as an upgrade. Confirm the files on disk change; the running process keeps
-    the old code until you log out or run
-    `pkill -x lionclip && setsid lionclip >/dev/null 2>&1 &`.
-23. `sudo apt remove lionclip`, then confirm `~/.local/share/lionclip` still
-    exists.
-24. Reinstall, confirm the history is still there.
-25. `sudo apt purge lionclip`, then confirm `~/.local/share/lionclip` still
-    exists and `/etc/xdg/autostart/io.github.Pianisuto.LionClip.desktop` is gone.
-26. Delete the data yourself if you want it gone:
-    `rm -rf ~/.local/share/lionclip`.
+## Still to check by hand
+
+These need eyes on the screen or a real keypress, and no automation here would
+prove anything:
+
+1. The icon in the app grid, the dock, Alt+Tab and *Settings → Apps*, on both
+   light and dark backgrounds.
+2. `Super+V` itself: press it, confirm the popup opens near the pointer; press
+   it again while open and confirm it closes without reopening elsewhere.
+3. Restore: `Enter` on a row, then `Ctrl+V` in another application, for text and
+   for an image.
+4. Search as you type, `Up`/`Down`, `Delete`, `Ctrl+P` to pin, and the overflow
+   menu's clear action.
+5. Click away from the popup and confirm it hides.
+6. The pointer near each screen edge, on the second monitor, and on a monitor at
+   a negative X coordinate if you have one.
+7. System light/dark switch while the popup is open.
+8. Log out and back in, then — without opening a terminal — copy something,
+   press `Super+V`, confirm the history from before the logout is there and that
+   `pgrep -xc lionclip` prints `1`.
 
 ### Diagnosing autostart
 
@@ -120,9 +118,15 @@ and invalid arguments.
 
 ## Known limitations
 
-- Installing, removing and purging the package need a password, so they were
-  scripted and inspected here but executed only as an unpacked tree
-  (`dpkg-deb -x`), not through `apt`.
+- **Toggle bursts at machine speed.** Driving `lionclip toggle` as fast as
+  separate processes can start it — roughly 15 map/unmap cycles per second —
+  ends in the opposite state about one run in three. The command handling is not
+  at fault: every burst produced exactly 15 shows for 30 toggles, so no command
+  was lost and no toggle misread the visibility. The extra hide comes from the
+  focus-loss auto-hide firing during the churn. It is self-correcting, never
+  leaves the popup stuck, and did not occur at 400 ms between presses, which is
+  already far faster than a keyboard shortcut. Not worth a timing heuristic in
+  the auto-hide path.
 - The package is `amd64` and targets `noble`. No other architecture, release or
   distribution is built.
 - A running LionClip keeps its old executable across an upgrade by design.
