@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    time::Instant,
 };
 
 use adw::prelude::*;
@@ -196,6 +197,11 @@ impl AppState {
                 let pending_paste_target = pending_paste_target.clone();
 
                 move |id| {
+                    // Measured from the moment the user's choice reaches the
+                    // application, so the diagnostic below covers everything
+                    // LionClip is responsible for — not just the X11 exchange
+                    // the paste backend times on its own.
+                    let activated = Instant::now();
                     let payload = history.borrow().item(id).map(|item| item.payload().clone());
                     // The target was captured once, when the popup opened;
                     // it is not consumed here, because Up/Down navigation and
@@ -210,14 +216,22 @@ impl AppState {
                     let Some(restore_succeeded) = restored else {
                         return;
                     };
+                    // Image restore reads the stored blob synchronously, so
+                    // this is the one part of the path whose cost depends on
+                    // the item rather than on the session.
+                    let restore_ms = activated.elapsed().as_millis();
 
                     let behavior =
                         paste::decide(settings.auto_paste(), target.is_some(), restore_succeeded);
                     if let (paste::SelectionBehavior::RestoreAndPaste, Some(target)) =
                         (behavior, target)
                     {
-                        paste.request_paste(target, |sent| {
-                            println!("lionclip: auto-paste result sent={sent}");
+                        paste.request_paste(target, move |sent| {
+                            println!(
+                                "lionclip: auto-paste result sent={sent} restore_ms={restore_ms} \
+                                 activation_to_keys_ms={}",
+                                activated.elapsed().as_millis()
+                            );
                         });
                     }
                 }
