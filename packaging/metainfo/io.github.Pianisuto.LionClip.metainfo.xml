@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Pianisuto.LionClip</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <name>LionClip</name>
+  <summary>Search and reuse what you copied</summary>
+  <developer id="io.github.pianisuto">
+    <name>Leonardo Vulczak</name>
+  </developer>
+  <description>
+    <p>
+      LionClip is a small native clipboard-history utility for GNOME and Zorin OS.
+      It records the text and images you copy, keeps them locally, and puts them
+      back on the clipboard from a popup that opens near the pointer.
+    </p>
+    <p>
+      The history stays on the device: there is no account, no sync and no
+      network access.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.Pianisuto.LionClip.desktop</launchable>
+  <provides>
+    <binary>lionclip</binary>
+  </provides>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>clipboard</keyword>
+    <keyword>history</keyword>
+    <keyword>paste</keyword>
+  </keywords>
+  <url type="homepage">https://github.com/Pianisuto/LionClip</url>
+  <url type="bugtracker">https://github.com/Pianisuto/LionClip/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-08-16">
+      <description>
+        <p>Desktop integration release: application ID, desktop entry, icon, autostart and Debian package.</p>
+      </description>
+    </release>
+  </releases>
+</component>

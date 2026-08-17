@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# Binds Super+V to `lionclip toggle` as a GNOME custom keybinding.
+#
+#   lionclip-shortcut status    show what Super+V is bound to today
+#   lionclip-shortcut install   bind Super+V to `lionclip toggle`
+#   lionclip-shortcut remove    remove the binding this script created
+#
+# The script is idempotent, never silently takes a shortcut away from something
+# else, and only ever writes the three custom-keybinding keys plus, with
+# --take-over, the one GNOME key it reports as the conflict.
+set -euo pipefail
+
+readonly BINDING='<Super>v'
+readonly COMMAND='lionclip toggle'
+readonly NAME='LionClip'
+readonly LIST_SCHEMA='org.gnome.settings-daemon.plugins.media-keys'
+readonly LIST_KEY='custom-keybindings'
+readonly ITEM_SCHEMA='org.gnome.settings-daemon.plugins.media-keys.custom-keybinding'
+readonly ITEM_PATH_PREFIX='/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/'
+
+# GNOME ships Super+V on the notification list. It is the only default binding
+# this script knows how to hand over, and only when asked to.
+readonly GNOME_CONFLICT_SCHEMA='org.gnome.shell.keybindings'
+readonly GNOME_CONFLICT_KEY='toggle-message-tray'
+
+usage() {
+    cat <<'EOF'
+usage: lionclip-shortcut <status|install|remove> [--take-over]
+
+  status       print the current Super+V binding and whether LionClip owns it
+  install      bind Super+V to `lionclip toggle`
+  remove       remove the LionClip binding
+  --take-over  with install: also clear a conflicting GNOME default binding
+EOF
+}
+
+require_gsettings() {
+    if ! command -v gsettings >/dev/null 2>&1; then
+        echo "lionclip-shortcut: gsettings not found; this needs a GNOME session" >&2
+        exit 1
+    fi
+}
+
+# Reads the custom-keybinding paths as one path per line. An empty list reads
+# back as "@as []", so the type annotation is dropped before the brackets are,
+# otherwise "@as" itself would be taken for a keybinding path.
+custom_paths() {
+    gsettings get "$LIST_SCHEMA" "$LIST_KEY" |
+        sed 's/^@[a-z]* //' | tr -d "[]' " | tr ',' '\n' | sed '/^$/d'
+}
+
+read_item() {
+    local path=$1 key=$2
+    gsettings get "$ITEM_SCHEMA:$path" "$key" 2>/dev/null | sed "s/^'//;s/'$//"
+}
+
+# Any shortcut that runs a lionclip binary is LionClip's own, whichever build it
+# points at. A shortcut left over from a development build is then updated in
+# place rather than reported as somebody else's shortcut.
+is_lionclip_command() {
+    local program=${1%% *}
+    [ "${program##*/}" = "lionclip" ]
+}
+
+# Prints the path of the custom keybinding that already runs LionClip, if any.
+lionclip_path() {
+    local path
+    while read -r path; do
+        [ -n "$path" ] || continue
+        if is_lionclip_command "$(read_item "$path" command)"; then
+            echo "$path"
+            return 0
+        fi
+    done < <(custom_paths)
+    return 1
+}
+
+# Prints "<path>\t<command>" for a custom keybinding on Super+V that belongs to
+# some other program.
+foreign_custom_binding() {
+    local path command
+    while read -r path; do
+        [ -n "$path" ] || continue
+        if [ "$(read_item "$path" binding)" = "$BINDING" ]; then
+            command=$(read_item "$path" command)
+            if ! is_lionclip_command "$command"; then
+                printf '%s\t%s\n' "$path" "$command"
+                return 0
+            fi
+        fi
+    done < <(custom_paths)
+    return 1
+}
+
+gnome_conflict() {
+    local value
+    value=$(gsettings get "$GNOME_CONFLICT_SCHEMA" "$GNOME_CONFLICT_KEY" 2>/dev/null || echo "@as []")
+    case "$value" in
+    *"'$BINDING'"*) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+# Appends a path to custom-keybindings, keeping the list a set.
+add_to_list() {
+    local path=$1 paths list
+
+    paths=$(custom_paths)
+    if printf '%s\n' "$paths" | grep -qxF "$path"; then
+        return 0
+    fi
+
+    list=$(
+        {
+            printf '%s\n' "$paths"
+            printf '%s\n' "$path"
+        } | sed '/^$/d' | sed "s/.*/'&'/" | paste -sd, -
+    )
+    gsettings set "$LIST_SCHEMA" "$LIST_KEY" "[$list]"
+}
+
+remove_from_list() {
+    local path=$1 list
+
+    list=$(custom_paths | grep -vxF "$path" | sed "s/.*/'&'/" | paste -sd, -)
+    gsettings set "$LIST_SCHEMA" "$LIST_KEY" "[$list]"
+}
+
+# Picks the first free lionclip-N path, so repeated installs reuse one entry.
+next_free_path() {
+    local index=0 path
+    while :; do
+        path="${ITEM_PATH_PREFIX}lionclip-${index}/"
+        if ! custom_paths | grep -qxF "$path"; then
+            echo "$path"
+            return 0
+        fi
+        index=$((index + 1))
+    done
+}
+
+cmd_status() {
+    local path conflict
+
+    if path=$(lionclip_path); then
+        echo "LionClip binding: $(read_item "$path" binding) runs $(read_item "$path" command)"
+    else
+        echo "LionClip binding: not installed"
+    fi
+
+    if conflict=$(foreign_custom_binding); then
+        echo "Super+V also runs a custom command: $(printf '%s' "$conflict" | cut -f2)"
+    fi
+    if gnome_conflict; then
+        echo "Super+V is a GNOME default: $GNOME_CONFLICT_SCHEMA $GNOME_CONFLICT_KEY"
+    fi
+}
+
+cmd_install() {
+    local take_over=$1 path conflict
+
+    if conflict=$(foreign_custom_binding); then
+        cat >&2 <<EOF
+lionclip-shortcut: Super+V already runs another custom command:
+  $(printf '%s' "$conflict" | cut -f2)
+Remove that shortcut in Settings > Keyboard > Custom Shortcuts first.
+EOF
+        exit 1
+    fi
+
+    if gnome_conflict; then
+        if [ "$take_over" != "yes" ]; then
+            cat >&2 <<EOF
+lionclip-shortcut: Super+V is bound to GNOME's $GNOME_CONFLICT_KEY.
+Both shortcuts would fire. Re-run with --take-over to clear the GNOME one:
+  lionclip-shortcut install --take-over
+Or bind LionClip to another key in Settings > Keyboard > Custom Shortcuts,
+with the command: $COMMAND
+EOF
+            exit 1
+        fi
+        gsettings set "$GNOME_CONFLICT_SCHEMA" "$GNOME_CONFLICT_KEY" "@as []"
+        echo "cleared GNOME $GNOME_CONFLICT_KEY"
+    fi
+
+    if path=$(lionclip_path); then
+        local current_command current_binding
+        current_command=$(read_item "$path" command)
+        current_binding=$(read_item "$path" binding)
+        if [ "$current_command" != "$COMMAND" ] || [ "$current_binding" != "$BINDING" ]; then
+            echo "updating the existing LionClip shortcut:"
+            echo "  from: $current_binding -> $current_command"
+            echo "  to:   $BINDING -> $COMMAND"
+        fi
+    else
+        path=$(next_free_path)
+    fi
+
+    add_to_list "$path"
+    gsettings set "$ITEM_SCHEMA:$path" name "$NAME"
+    gsettings set "$ITEM_SCHEMA:$path" command "$COMMAND"
+    gsettings set "$ITEM_SCHEMA:$path" binding "$BINDING"
+    echo "Super+V now runs: $COMMAND"
+}
+
+cmd_remove() {
+    local path
+
+    if ! path=$(lionclip_path); then
+        echo "LionClip has no custom keybinding to remove"
+        return 0
+    fi
+
+    remove_from_list "$path"
+    gsettings reset "$ITEM_SCHEMA:$path" name || true
+    gsettings reset "$ITEM_SCHEMA:$path" command || true
+    gsettings reset "$ITEM_SCHEMA:$path" binding || true
+    echo "removed the LionClip keybinding"
+    echo "GNOME's own Super+V default, if you cleared it, is restored with:"
+    echo "  gsettings reset $GNOME_CONFLICT_SCHEMA $GNOME_CONFLICT_KEY"
+}
+
+main() {
+    local action=${1:-} take_over=no
+
+    case "${2:-}" in
+    --take-over) take_over=yes ;;
+    "") ;;
+    *)
+        echo "lionclip-shortcut: unknown option '$2'" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+
+    case "$action" in
+    status)
+        require_gsettings
+        cmd_status
+        ;;
+    install)
+        require_gsettings
+        cmd_install "$take_over"
+        ;;
+    remove)
+        require_gsettings
+        cmd_remove
+        ;;
+    -h | --help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=LionClip
+GenericName=Clipboard History
+Comment=Search and reuse what you copied
+Exec=lionclip show
+Icon=io.github.Pianisuto.LionClip
+Terminal=false
+Categories=Utility;GTK;
+Keywords=clipboard;history;copy;paste;clip;
+StartupNotify=false
+StartupWMClass=lionclip
+X-GNOME-UsesNotifications=false

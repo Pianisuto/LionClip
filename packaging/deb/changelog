@@ -1,0 +1,7 @@
+lionclip (0.1.0) noble; urgency=medium
+
+  * Desktop integration: final application ID, desktop entry, icon, autostart
+    entry and the show/hide/toggle command surface.
+  * First Debian package for Ubuntu 24.04 and Zorin OS based on noble.
+
+ -- Leonardo Vulczak <leonardovulczak@gmail.com>  Sun, 16 Aug 2026 00:00:00 +0000
