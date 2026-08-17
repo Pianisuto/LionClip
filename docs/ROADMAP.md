@@ -402,6 +402,72 @@ benefit); and exposing the 512 MiB aggregate image storage cap as a setting
 
 ---
 
+## Phase 7 — Performance and optimization
+
+**Status: implemented; measured on the target Zorin GNOME/X11 machine.** No
+feature, UX, persistence or security behavior changed.
+
+### Goal
+
+Make the existing application faster by removing redundant work, without
+adding anything or altering behavior.
+
+### Result
+
+Profiling the real popup path (release build, 500 seeded text items, on the
+target session) found one dominant cost that had nothing to do with the list
+being long: `gtk_widget_set_tooltip_text` measured **8.3 ms per call**, because
+it always ends in `gtk_widget_trigger_tooltip_query`, which asks the display
+for the pointer position and the surface under it. Each history row set two
+tooltips, so every row cost ~16.6 ms to build regardless of anything LionClip
+does. Rows now declare `has-tooltip` and answer `query-tooltip`, which shows
+the same tooltip on hover and sets the same accessible description, without the
+immediate query — a query that had nothing to re-evaluate anyway, since the
+widget is not in a window yet.
+
+Placement stopped opening a fresh X connection per call. It still does not
+share GTK's display connection — that separation is what keeps a pending unmap
+from being processed after the move — but the connection is now kept between
+calls instead of being rebuilt twice per popup open and again on every
+activation change. Its four independent queries (pointer, geometry, monitors,
+size hints) are issued before any reply is read, and the two writes are queued
+before either is checked, so a placement costs one round trip rather than
+seven.
+
+The remaining work was redundancy: clearing history compared every id against
+every item (quadratic, one million comparisons at the 1000-item limit); a
+retention pass recompiled the same `DELETE` once per removed row; every image
+capture allocated and zeroed a 25 MiB buffer whatever the screenshot's actual
+size, because `read_all` needs a buffer as large as the biggest payload it will
+accept; and every history mutation walked the whole history to build an image
+reference set that was almost always thrown away unused.
+
+### Measured, 500 items, same machine and build profile
+
+| Popup open phase | Before | After |
+| --- | --- | --- |
+| `prepare` (build rows) | 8042 ms | 41 ms |
+| `place` (X11 placement) | 3.21 ms | 0.14 ms |
+| `present` (GTK layout) | 456 ms | 482 ms |
+| **total** | **8502 ms** | **522 ms** |
+
+`present` is unchanged within run-to-run noise, and is now the whole cost.
+
+### Known remaining bottleneck
+
+`present` is `GtkListBox` measuring every row: it is not a virtualized list, so
+laying out 500 non-uniform wrapped rows is O(n) by construction, about 0.9 ms
+per row. Removing it means replacing `GtkListBox` with `GtkListView` and a
+list model, which rewrites selection, keyboard navigation, row actions and
+index handling — all behavior Phase 3 deliberately pinned down. That is a
+scoped change of its own, not a Phase 7 optimization.
+
+Pinning `width_chars` on the preview label makes layout 3× faster (462 ms →
+155 ms) but widens the popup from 430 px to 480 px, so it was rejected: Phase 7
+does not change UX.
+
+---
+
 ## Post-V1 ideas — not committed
 
 Evaluate only after V1 is stable:

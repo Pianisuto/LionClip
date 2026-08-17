@@ -347,7 +347,21 @@ AdwApplicationWindow (430 px, undecorated, non-resizable)
 
 Height follows content up to the list cap, so a short history stays small.
 Rows are rebuilt from the filtered snapshot; row identity for every action is
-`HistoryItemId`, never the GTK row index. Row actions are real buttons that stay
+`HistoryItemId`, never the GTK row index.
+
+Row action buttons declare `has-tooltip` and answer `query-tooltip` rather than
+calling `set_tooltip_text`. The setter always ends in
+`gtk_widget_trigger_tooltip_query`, which asks the display where the pointer is
+and which surface it is over; on the X11 target that measured 8.3 ms per call,
+and two tooltips per row made row construction cost ~16.6 ms whatever the row
+contained. The query has nothing to re-evaluate on a widget that is not in a
+window yet. The hover tooltip and the accessible description are unchanged.
+
+`GtkListBox` is not virtualized, so it measures every row it holds. Laying out
+a full 500-item history therefore costs about 0.9 ms per row no matter what is
+on screen, and that is what dominates opening the popup once row construction
+is cheap. Fixing it means `GtkListView` and a list model, which would rewrite
+the selection, keyboard-navigation and row-action semantics above. Row actions are real buttons that stay
 reachable by keyboard and are revealed on hover, selection or focus by a small
 stylesheet with no hardcoded colors. The pin is a toggle, so the theme draws it
 checked and the pinned state is visible on the row itself, next to the pinned
@@ -568,6 +582,19 @@ that keeps moving while the popup opens cannot pull it to a second position.
 Placement also runs on its own X connection, so the display is synchronised
 first: a pending unmap from a previous open could otherwise be processed after
 the move and leave the popup at its old position.
+
+That connection is opened once and kept, not rebuilt per call. What the unmap
+argument requires is that placement does not share GTK's connection, which a
+kept connection satisfies just as well; opening one means a socket connect plus
+reading the server's whole setup, and placement runs twice per popup open with
+`holds_keyboard_focus` running again on every activation change. Any failure
+drops it so the next call reconnects. Within one placement the four independent
+queries — pointer, window geometry, RandR monitors, existing size hints — are
+all issued before the first reply is read, and the size-hints and configure
+writes are both queued before either is checked, so a placement costs one round
+trip instead of seven. The auto-paste backend deliberately keeps its own
+per-attempt connection: it runs on blocking-pool threads and registers for
+focus events, neither of which may be shared with placement.
 
 Steps 2 and 3 remove the visible jump; step 4 covers whatever the compositor
 does in between. Placement maths, clamping, monitor selection and the fallback
