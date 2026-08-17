@@ -72,6 +72,12 @@ impl ImageCleanupCoordinator {
         if self.inner.in_flight.get() != 0 {
             return;
         }
+        // Every history mutation flushes, but almost none of them queue
+        // anything: without this the common path still walked the whole
+        // history to build a reference set it then never consulted.
+        if self.inner.pending.borrow().is_empty() {
+            return;
+        }
 
         let referenced: HashSet<&str> = items
             .iter()

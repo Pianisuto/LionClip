@@ -4,7 +4,7 @@ use std::{
     rc::Rc,
 };
 
-use gtk::{gdk, gio, gio::prelude::InputStreamExtManual, glib, prelude::ObjectExt};
+use gtk::{gdk, gio, gio::prelude::InputStreamExt, glib, prelude::ObjectExt};
 
 use crate::{
     history::{HistoryUpdate, ImageData, ImageMime, TextHistory},
@@ -321,13 +321,27 @@ async fn capture_image_task(
         .and_then(ImageMime::parse)
         .unwrap_or(requested_mime);
 
-    let buffer = vec![0_u8; MAX_IMAGE_ENCODED_BYTES + 1];
-    let (mut bytes, read, partial_error) = match stream
-        .read_all_future(buffer, glib::Priority::DEFAULT)
-        .await
-    {
-        Ok(value) => value,
-        Err((_buffer, _error)) => {
+    let read = read_bounded_image(&stream, MAX_IMAGE_ENCODED_BYTES).await;
+    if change_sequence.get() != sequence {
+        return;
+    }
+    let bytes = match read {
+        ImageRead::Complete(bytes) => bytes,
+        ImageRead::Rejected => {
+            eprintln!("lionclip: image capture rejected reason=encoded-size-or-read");
+            fallback_to_text(
+                clipboard,
+                sequence,
+                generation,
+                change_sequence,
+                history,
+                history_changed,
+                suppression,
+                settings.clone(),
+            );
+            return;
+        }
+        ImageRead::Failed => {
             fallback_to_text(
                 clipboard,
                 sequence,
@@ -341,24 +355,6 @@ async fn capture_image_task(
             return;
         }
     };
-    if change_sequence.get() != sequence {
-        return;
-    }
-    if partial_error.is_some() || read == 0 || read > MAX_IMAGE_ENCODED_BYTES {
-        eprintln!("lionclip: image capture rejected reason=encoded-size-or-read");
-        fallback_to_text(
-            clipboard,
-            sequence,
-            generation,
-            change_sequence,
-            history,
-            history_changed,
-            suppression,
-            settings.clone(),
-        );
-        return;
-    }
-    bytes.truncate(read);
 
     let worker_paths = paths.clone();
     let stored = match gio::spawn_blocking(move || {
@@ -429,6 +425,59 @@ async fn capture_image_task(
     notify_if_changed(update, &history_changed);
 }
 
+/// How much of the offered image payload is asked for at a time. Large enough
+/// that a normal screenshot arrives in a handful of reads, small enough that
+/// the buffer never dwarfs the payload.
+const IMAGE_READ_CHUNK: usize = 256 * 1024;
+
+/// Outcome of reading the image payload the clipboard offered.
+enum ImageRead {
+    /// A complete payload within [`MAX_IMAGE_ENCODED_BYTES`].
+    Complete(Vec<u8>),
+    /// Nothing was offered, or more than the cap allows.
+    Rejected,
+    /// The stream itself failed part-way through.
+    Failed,
+}
+
+/// Reads the offered image in bounded chunks, stopping as soon as it is clear
+/// the payload exceeds `limit`.
+///
+/// `read_all` needs a buffer large enough for the biggest payload it will
+/// accept, so the previous shape allocated and zeroed 25 MiB on *every* image
+/// capture — a 40 KiB screenshot paid for it in full. Growing the buffer as
+/// the payload arrives costs one reallocation per chunk actually offered, and
+/// an oversized payload is now abandoned mid-stream instead of after being
+/// read in its entirety.
+///
+/// `limit` is a parameter rather than a direct read of
+/// [`MAX_IMAGE_ENCODED_BYTES`] so the accept/reject boundary can be tested
+/// without moving 25 MiB through a test stream.
+async fn read_bounded_image(stream: &gio::InputStream, limit: usize) -> ImageRead {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = match stream
+            .read_bytes_future(IMAGE_READ_CHUNK, glib::Priority::DEFAULT)
+            .await
+        {
+            Ok(chunk) => chunk,
+            Err(_) => return ImageRead::Failed,
+        };
+        if chunk.is_empty() {
+            break;
+        }
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return ImageRead::Rejected;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    if bytes.is_empty() {
+        return ImageRead::Rejected;
+    }
+    ImageRead::Complete(bytes)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fallback_to_text(
     clipboard: gdk::Clipboard,
@@ -460,5 +509,62 @@ fn notify_if_changed(update: HistoryUpdate, history_changed: &HistoryChangedCall
         && let Some(callback) = history_changed.borrow().as_ref()
     {
         callback();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gtk::gio::prelude::*;
+
+    use super::*;
+
+    /// Drives the read to completion without a display: these exercise the
+    /// size boundary and the chunk loop, neither of which touches GTK.
+    fn read(payload: &[u8], limit: usize) -> ImageRead {
+        let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from(payload));
+        glib::MainContext::new().block_on(read_bounded_image(
+            stream.upcast_ref::<gio::InputStream>(),
+            limit,
+        ))
+    }
+
+    #[test]
+    fn a_payload_within_the_limit_is_read_exactly() {
+        let payload = b"a small screenshot".to_vec();
+        let ImageRead::Complete(bytes) = read(&payload, 1024) else {
+            panic!("payload within the limit should be complete");
+        };
+        assert_eq!(bytes, payload);
+    }
+
+    #[test]
+    fn a_payload_spanning_several_chunks_is_reassembled_in_order() {
+        // Larger than one read, so the accumulating loop is what is under test
+        // rather than a single lucky read.
+        let payload: Vec<u8> = (0..IMAGE_READ_CHUNK * 2 + 7)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let ImageRead::Complete(bytes) = read(&payload, payload.len()) else {
+            panic!("a multi-chunk payload within the limit should be complete");
+        };
+        assert_eq!(bytes, payload);
+    }
+
+    #[test]
+    fn the_limit_itself_is_accepted_and_one_byte_more_is_rejected() {
+        let payload = vec![7_u8; 4096];
+        assert!(matches!(
+            read(&payload, payload.len()),
+            ImageRead::Complete(_)
+        ));
+        assert!(matches!(
+            read(&payload, payload.len() - 1),
+            ImageRead::Rejected
+        ));
+    }
+
+    #[test]
+    fn an_empty_payload_is_rejected_rather_than_stored() {
+        assert!(matches!(read(&[], 1024), ImageRead::Rejected));
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{
     image_cleanup::ImageCleanupCoordinator, image_store::MAX_IMAGE_STORAGE_BYTES,
     storage::StoragePaths,
@@ -431,6 +433,13 @@ impl TextHistory {
     }
 
     fn remove_ids(&mut self, ids: &[HistoryItemId]) -> Vec<HistoryItemId> {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        // A clear passes every item's id, so the linear `contains` this used
+        // to do made the retain below quadratic: 250_000 comparisons to clear
+        // a full 500-item history, and 1_000_000 at the 1000-item limit.
+        let ids: HashSet<HistoryItemId> = ids.iter().copied().collect();
         let cleanup = self.image_cleanup.clone();
         let mut removed = Vec::new();
         self.items.retain(|item| {
