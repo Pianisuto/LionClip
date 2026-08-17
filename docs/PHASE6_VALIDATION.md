@@ -8,12 +8,22 @@ everything that needs a real desktop. Read `AGENTS.md` and
 
 ## Verified automatically
 
-`cargo test --all-features` (107 tests) covers:
+`cargo test --all-features` (111 tests, 6 of them Xvfb-backed) covers:
 
 - **Settings persistence** — defaults match the schema; each setting
   persists across reads; the history-limit setter snaps an out-of-range value
   to the nearest of 100/250/500/1000; two isolated `SettingsService`
   instances never see each other's values (see `src/settings/service.rs`).
+- **History-limit change notification** — a subscriber registered through
+  `SettingsService::connect_history_limit_changed` is called with the new
+  value when the stored limit changes, and only ever with a snapped one, so
+  an out-of-band `gsettings` value cannot reach `TextHistory` unsnapped.
+  This is what makes an external `gsettings set
+  io.github.Pianisuto.LionClip history-limit 100` shrink the *running*
+  history rather than only the persisted value and the Preferences UI. The
+  test runs against an isolated in-memory settings backend on a private main
+  context, so it never reads or writes the developer's real settings
+  (`src/settings/service.rs`).
 - **Autostart override** — no override file means enabled; disabling writes
   a `Hidden=true` override and enabling removes it; a non-`Hidden` override
   is still treated as enabled; toggling twice is idempotent
@@ -21,7 +31,11 @@ everything that needs a real desktop. Read `AGENTS.md` and
 - **History domain rules** — `clear_unpinned` keeps pinned items and is
   rejected when nothing would change; `clear_all` removes pinned and
   unpinned alike and is rejected when already empty; both bump the
-  `TextHistory` generation counter; `set_unpinned_limit` applies retention
+  `TextHistory` generation counter, including on the attempts that remove
+  nothing — a `clear_all` over an empty history and a `clear_unpinned` with
+  only pinned items each still change the generation while returning
+  `Rejected`, so a capture that started before the clear is discarded
+  instead of landing right after it; `set_unpinned_limit` applies retention
   immediately and never touches pinned items; the same-value case is a no-op
   (`src/history/service.rs`). `clear_all` persists and survives a restart
   (`src/history/regression_tests.rs`).
@@ -57,8 +71,11 @@ CI additionally compiles `packaging/schemas/*.gschema.xml` with
 `glib-compile-schemas --strict`, asserts the built `.deb` contains the schema
 source and does **not** contain a compiled `gschemas.compiled` (that file is
 the merge of every schema on the system; shipping our own would clobber every
-other application's), and runs the Xvfb-backed tests as part of the normal
-test job.
+other application's), asserts the `.deb` declares `libglib2.0-bin` — the
+package providing the `glib-compile-schemas` that `postinst`/`postrm` run,
+which `dpkg-shlibdeps` cannot infer from the binary — and runs the
+Xvfb-backed tests as part of the normal test job. The whole workflow
+(`checks` and `package`) is green on this branch.
 
 ## Not verifiable in this environment
 
@@ -92,6 +109,12 @@ Run on the target Zorin GNOME/X11 machine, from the installed package
 1. Open via the popup's overflow menu → *Preferences*, and via
    `lionclip settings` from a terminal: both must reuse the same window
    (check `pgrep -xc lionclip` stays `1`; no second window appears).
+   On a machine where LionClip has never been installed before, confirm
+   first that `apt` pulled in `libglib2.0-bin` and that the schema is really
+   compiled — `gsettings get io.github.Pianisuto.LionClip history-limit`
+   must print a value rather than failing with "No such schema". Without
+   that dependency `postinst` skips `glib-compile-schemas` silently and
+   preferences degrade to unpersisted defaults.
 2. Close the window (X button), then reopen with `lionclip settings` — it
    must reappear with the same state, not rebuild from scratch.
 3. Confirm the window looks like a normal small GNOME settings window: no
@@ -108,6 +131,17 @@ Run on the target Zorin GNOME/X11 machine, from the installed package
    confirm the oldest unpinned items (and, for images, their thumbnail/blob
    files under `~/.local/share/lionclip`) disappear immediately, pinned
    items are untouched, and no restart was needed.
+   Then, with Preferences **closed** and more than 100 unpinned items again,
+   change the limit from outside the process:
+
+   ```bash
+   gsettings set io.github.Pianisuto.LionClip history-limit 100
+   ```
+
+   The running instance must shrink its history the same way — open the
+   popup and confirm the count, without restarting LionClip and without
+   having opened Preferences. Pinned items must survive. Reopen Preferences
+   afterwards and confirm the combo row shows 100.
 6. **Save copied images** — turn off, copy a new screenshot: it must not
    appear in history, but copying new text still works. Copy an image from
    an app that also offers a text representation (e.g. a file manager

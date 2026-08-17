@@ -453,11 +453,26 @@ change, and the popup calls `settings.recording_paused()` every time it
 rebuilds to decide whether to show its "History paused" indicator. In this
 process, GSettings itself is the only writer these consumers care about, and
 a live read is cheap, so there was nothing a signal would buy beyond
-indirection. The one setting that needs a proactive reaction is `history
-limit`, because nothing else naturally triggers a retention pass: the
-preferences window calls `TextHistory::set_unpinned_limit` directly, which
-runs the existing `enforce_retention` path immediately, the same one that
-already runs after every insert.
+indirection.
+
+The one setting that needs a proactive reaction is `history-limit`, because
+nothing else naturally triggers a retention pass. That reaction is driven by
+the setting itself, not by the window that happens to change it:
+`SettingsService::connect_history_limit_changed` wraps the GSettings
+`changed::history-limit` signal, and `AppState` subscribes once at startup to
+call `TextHistory::set_unpinned_limit` — which runs the existing
+`enforce_retention` path immediately, the same one that already runs after
+every insert — and then refresh an open popup. Anchoring it on the key means
+`gsettings set io.github.Pianisuto.LionClip history-limit 100` from a
+terminal shrinks the resident history exactly like moving the combo row does,
+rather than updating the stored value and the preferences UI while the
+running history keeps enforcing the old cap until the next restart. GSettings
+already delivers those notifications, so this costs no polling and no timer.
+The preferences window still applies the change directly as well: that call
+is idempotent, and it is the only path left in the unpersisted-defaults
+fallback, where there is no backend to notify from. Values arriving this way
+are snapped through `nearest_history_limit` just like written ones, so an
+out-of-band `gsettings` value can never reach `TextHistory` unsnapped.
 
 `recording_paused` and `save_images` are additionally re-evaluated right
 before an item is recorded, not only when the clipboard changed. A capture is
@@ -497,6 +512,16 @@ cleanup through the existing `ImageCleanupCoordinator`) if a clear happened
 in between. Without this, a capture that was already in flight when the user
 cleared history could otherwise insert itself right after the clear that was
 supposed to remove it.
+
+The counter is bumped by *every* clear attempt, before the check for whether
+there was anything to remove — so an empty history, or one holding only
+pinned items, still invalidates captures already in flight. What invalidates
+them is the user explicitly asking for a clear, not whether rows happened to
+exist at that instant: bumping only on the removing path would leave exactly
+the case where the clear finds nothing and the in-flight capture lands right
+after it, repopulating a history the user just cleared. The return value is
+unaffected and still reports `Rejected` when nothing was removed, which is
+what keeps the UI from claiming a change that did not happen.
 
 ## Positioning
 
@@ -780,21 +805,34 @@ one of our own would clobber every other application's compiled schemas.
 best-effort, tool-presence-guarded pattern already used to refresh the icon
 cache and the desktop database.
 
-Runtime dependencies are not written by hand. `dpkg-shlibdeps` reads the built
-binary and produces the versioned list — GTK4, Libadwaita, GLib, GDK-Pixbuf,
-Pango, libc, libgcc — so they cannot drift from what LionClip actually links
-against, and no `-dev` package can leak in. SQLite is statically bundled by
-`rusqlite` and correctly produces no dependency; `x11rb` speaks the X11 protocol
-in Rust and links no X client library, so X11 comes in through GTK. Only
-`hicolor-icon-theme` is added by hand, because the package installs into that
-theme's directories.
+Shared-library dependencies are not written by hand. `dpkg-shlibdeps` reads
+the built binary and produces the versioned list — GTK4, Libadwaita, GLib,
+GDK-Pixbuf, Pango, libc, libgcc — so they cannot drift from what LionClip
+actually links against, and no `-dev` package can leak in. SQLite is
+statically bundled by `rusqlite` and correctly produces no dependency;
+`x11rb` speaks the X11 protocol in Rust and links no X client library, so X11
+comes in through GTK.
 
-The maintainer scripts do two things: refresh the icon cache and the desktop
-database. They never start, stop or restart LionClip, and they never touch user
-data. A running instance keeps the executable it started from until the user
-logs out or restarts it, which `README.Debian` says plainly; killing a user's
-running process from a package script would lose whatever the monitor had not
-yet written.
+What the *maintainer scripts* need is invisible to `dpkg-shlibdeps` — it
+inspects an ELF binary, not shell — so those dependencies are declared by
+hand in `packaging/deb/build.sh`, and CI asserts they are present in the
+built `.deb`:
+
+- `hicolor-icon-theme`, because the package installs into that theme's
+  directories;
+- `libglib2.0-bin`, which is the package providing `/usr/bin/glib-compile-schemas`
+  on the Ubuntu/Zorin `noble` target. `postinst`/`postrm` run it to build
+  `gschemas.compiled` in place, and it is not pulled in by the GLib shared
+  library the binary links against. Without it the preferences schema would be
+  installed but never compiled, and `SettingsService` would silently fall back
+  to unpersisted defaults on a freshly installed system.
+
+The maintainer scripts refresh the icon cache, the desktop database and the
+compiled GSettings schemas. They never start, stop or restart LionClip, and
+they never touch user data. A running instance keeps the executable it started
+from until the user logs out or restarts it, which `README.Debian` says
+plainly; killing a user's running process from a package script would lose
+whatever the monitor had not yet written.
 
 Clipboard history is user data. `remove` and `purge` both leave
 `$XDG_DATA_HOME/lionclip` alone: it can belong to several users on one machine,

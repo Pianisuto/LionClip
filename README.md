@@ -103,7 +103,9 @@ Settings persist through GSettings and apply immediately, without a restart:
 
 - **history limit** — 100/250/500/1000 unpinned items; lowering it evicts the
   oldest unpinned items (and their stored images) right away, pinned items are
-  never affected;
+  never affected. Changing it with `gsettings` or dconf-editor instead of the
+  window applies to the running instance just the same, with no restart and
+  without opening Preferences;
 - **save copied images** — off stops capturing new images while keeping the
   ones already in history; a plain-text representation offered alongside an
   ignored image is still captured;
@@ -251,7 +253,10 @@ improve without destabilizing validated X11 behavior.
 - scripting;
 - plugin systems;
 - clipboard sharing between machines;
-- automatic keystroke injection / auto-paste;
+- keystroke injection as default behavior — Phase 6 added auto-paste as an
+  explicit, off-by-default, X11-only opt-in (see
+  [`SECURITY.md`](SECURITY.md)); LionClip still never synthesizes input
+  unless the user turns that setting on;
 - becoming a general-purpose launcher.
 
 ## Architecture
@@ -302,11 +307,14 @@ Build the package (needs `dpkg-dev`, and `librsvg2-bin` or
 packaging/deb/build.sh
 ```
 
-It writes `target/deb/lionclip_<version>_amd64.deb`, taking the runtime
-dependencies from `dpkg-shlibdeps` reading the built binary. Everything the
-package installs comes from [`packaging/`](packaging): the desktop entry, the
-autostart entry, the AppStream metainfo, the icon source and the maintainer
-scripts.
+It writes `target/deb/lionclip_<version>_amd64.deb`, taking the
+shared-library dependencies from `dpkg-shlibdeps` reading the built binary
+and adding the two the maintainer scripts need but no binary reveals:
+`hicolor-icon-theme` for the icon directories and `libglib2.0-bin` for the
+`glib-compile-schemas` that compiles the preferences schema on install.
+Everything the package installs comes from [`packaging/`](packaging): the
+desktop entry, the autostart entry, the AppStream metainfo, the icon source
+and the maintainer scripts.
 
 Before pushing:
 

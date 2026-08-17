@@ -342,13 +342,20 @@ package's system-wide entry, so the filesystem stays the one source of truth
 instead of risking a GSettings value that disagrees with it.
 
 History limit changes apply retention immediately through the existing
-`TextHistory::enforce_retention` path; a new `clear_all` operation backs the
-Preferences "Clear history" action, distinct from the popup's narrower
-"Clear Unpinned History…", and both bulk-clear operations now bump a
+`TextHistory::enforce_retention` path. The reaction hangs off the GSettings
+key rather than off the preferences window, so a `gsettings set
+io.github.Pianisuto.LionClip history-limit 100` from a terminal shrinks the
+resident history exactly like moving the combo row does — no polling, no
+restart, and pinned items untouched either way. A new `clear_all` operation
+backs the Preferences "Clear history" action, distinct from the popup's
+narrower "Clear Unpinned History…", and both bulk-clear operations bump a
 generation counter that in-flight asynchronous captures (image processing in
 particular, which can span multiple await points) check before inserting, so
 a capture that was already running when a clear ran can no longer make a
-just-cleared item reappear. `save_images` and `recording_paused` are read
+just-cleared item reappear. The counter is bumped on every clear *attempt*,
+before the check for whether anything was there to remove, so a clear over
+an empty (or entirely pinned) history still invalidates captures already in
+flight; the return value still reports that nothing was removed. `save_images` and `recording_paused` are read
 directly by the clipboard capture handler on every clipboard change, with no
 caching and no signal-wiring layer to keep in sync; a paused handler does no
 work at all, not even inspecting offered MIME types.
@@ -366,15 +373,23 @@ is captured once, when the popup is shown and confirmed not visible yet
 `Enter`/click activation on a history row can trigger a paste attempt, never
 navigation, pin, delete, search, menu or Preferences; the clipboard restore
 must complete and report success before any paste is attempted; the target's
-existence is re-checked at paste time; activation is requested through both
-`_NET_ACTIVE_WINDOW` and a direct `SetInputFocus` reinforcement; the actual
-key synthesis only runs after a real `FocusIn` event confirms the target
-regained focus, waited for with a bounded (~400 ms) non-blocking poll rather
-than a blind sleep; and every failure path — invalid/destroyed target,
-disabled setting, failed restore, unconfirmed focus — falls back to
-restore-only. On Wayland the setting persists but the switch is disabled
-with an explanatory subtitle, and selecting an item only restores the
-clipboard, exactly like the setting being off.
+existence is re-checked at paste time; activation — through both
+`_NET_ACTIVE_WINDOW` and a direct `SetInputFocus` reinforcement — is
+requested only when the target does not already hold the focus, and is
+abandoned outright when some third window has taken it, because pulling
+focus away from whatever the user moved on to would be worse than not
+pasting; key synthesis runs only after focus is confirmed from real X server
+state (a `GetInputFocus` reply already naming the target, or a `FocusIn`
+event saying it just gained it), waited for with a bounded (~400 ms)
+non-blocking poll rather than a blind sleep, and that confirmation is
+re-checked once more immediately before the keys go out; and every failure
+path — invalid/destroyed target, foreign focus, disabled setting, failed
+restore, unconfirmed focus — falls back to restore-only. The final re-check
+narrows the inherent check-then-act window to a single round trip; X offers
+no atomic "send this key only if window W still has focus", so it cannot
+close it. On Wayland the setting persists but the switch is disabled with an
+explanatory subtitle, and selecting an item only restores the clipboard,
+exactly like the setting being off.
 
 Deliberately left out: retention by wall-clock days (schema v2 has no real
 timestamps, only logical sequences, and a migration solely to support a
