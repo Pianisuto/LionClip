@@ -45,9 +45,10 @@ pub struct TextHistory {
     image_storage_limit: u64,
     persistence: Option<PersistenceWorker>,
     image_cleanup: Option<ImageCleanupCoordinator>,
-    /// Bumped by [`Self::clear_unpinned`] and [`Self::clear_all`]. An
-    /// in-flight asynchronous capture (image processing, or a clipboard text
-    /// read still awaiting its future) snapshots this before it starts and
+    /// Bumped by every [`Self::clear_unpinned`] and [`Self::clear_all`]
+    /// attempt, including the ones that remove nothing. An in-flight
+    /// asynchronous capture (image processing, or a clipboard text read
+    /// still awaiting its future) snapshots this before it starts and
     /// compares it again right before inserting; a mismatch means a bulk
     /// clear ran while the capture was in flight, so the capture is dropped
     /// instead of reappearing right after the clear that was supposed to
@@ -221,10 +222,17 @@ impl TextHistory {
     }
 
     pub fn clear_unpinned(&mut self) -> HistoryChange {
+        // Bumped before the "is there anything to remove?" test, not after
+        // it: what invalidates an in-flight capture is the user explicitly
+        // asking for a clear, not whether rows happened to exist at this
+        // instant. Bumping only on the removing path would let a capture
+        // that started before a clear over an entirely pinned history land
+        // just after it — the exact reappearance the counter exists to
+        // prevent. The return value still reports what was removed.
+        self.generation = self.generation.wrapping_add(1);
         if !self.has_unpinned() {
             return HistoryChange::Rejected;
         }
-        self.generation = self.generation.wrapping_add(1);
         let removed_ids = self
             .items
             .iter()
@@ -241,10 +249,12 @@ impl TextHistory {
     /// history" action; the popup's own overflow menu only ever offers the
     /// narrower [`Self::clear_unpinned`].
     pub fn clear_all(&mut self) -> HistoryChange {
+        // Bumped before the emptiness test, for the same reason
+        // [`Self::clear_unpinned`] does; see the comment there.
+        self.generation = self.generation.wrapping_add(1);
         if self.items.is_empty() {
             return HistoryChange::Rejected;
         }
-        self.generation = self.generation.wrapping_add(1);
         let removed_ids = self
             .items
             .iter()
@@ -579,6 +589,32 @@ mod tests {
         let generation = history.generation();
         history.record("B".into());
         history.clear_all();
+        assert_ne!(history.generation(), generation);
+    }
+
+    #[test]
+    fn clear_all_over_an_empty_history_still_invalidates_captures_already_in_flight() {
+        let mut history = TextHistory::default();
+        assert!(history.items().is_empty());
+        let generation = history.generation();
+
+        // A capture that started before this clear must be dropped even
+        // though the clear itself had nothing to remove; otherwise it lands
+        // afterwards and repopulates a history the user just cleared.
+        assert_eq!(history.clear_all(), HistoryChange::Rejected);
+        assert_ne!(history.generation(), generation);
+    }
+
+    #[test]
+    fn clear_unpinned_with_nothing_unpinned_still_invalidates_captures_already_in_flight() {
+        let mut history = TextHistory::default();
+        history.record("pinned".into());
+        let pinned_id = history.items()[0].id();
+        history.pin(pinned_id);
+        assert!(!history.has_unpinned());
+        let generation = history.generation();
+
+        assert_eq!(history.clear_unpinned(), HistoryChange::Rejected);
         assert_ne!(history.generation(), generation);
     }
 
