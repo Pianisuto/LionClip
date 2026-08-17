@@ -55,6 +55,13 @@ impl SessionDiagnostics {
         }
     }
 
+    /// Whether the GDK backend is X11, native or through XWayland. Auto-paste
+    /// gates on this the same way popup placement already does: both need
+    /// the isolated `x11rb` backend, which only exists for this backend.
+    pub fn is_x11(&self) -> bool {
+        self.backend == DisplayBackend::X11
+    }
+
     fn x11_status(&self) -> X11PathStatus {
         if self.session_type.eq_ignore_ascii_case("x11") {
             X11PathStatus::Working

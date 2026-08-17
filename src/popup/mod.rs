@@ -8,7 +8,11 @@ use std::{
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
-use crate::history::{HistoryItemId, HistoryQuery, TextHistory, TextHistoryItem};
+use crate::{
+    clipboard::ClipboardWriter,
+    history::{HistoryItemId, HistoryQuery, TextHistory, TextHistoryItem},
+    settings::SettingsService,
+};
 
 const POPUP_WIDTH: i32 = 430;
 const PLACEHOLDER_HEIGHT: i32 = 128;
@@ -66,6 +70,8 @@ pub struct HistoryPopup {
 
 struct PopupState {
     history: Rc<RefCell<TextHistory>>,
+    settings: Rc<SettingsService>,
+    writer: ClipboardWriter,
     window: adw::ApplicationWindow,
     search: gtk::SearchEntry,
     list: gtk::ListBox,
@@ -73,9 +79,11 @@ struct PopupState {
     placeholder: gtk::Box,
     placeholder_title: gtk::Label,
     placeholder_body: gtk::Label,
+    paused_indicator: gtk::Box,
     clear_action: gio::SimpleAction,
     visible: RefCell<Vec<VisibleRow>>,
     restore: Box<dyn Fn(HistoryItemId)>,
+    open_settings: Box<dyn Fn()>,
     /// Answering `None` falls back to trusting the toplevel's own state.
     keeps_keyboard_focus: KeyboardFocusProbe,
     /// Number of the popup's own surfaces (overflow menu, confirmation dialog)
@@ -92,11 +100,15 @@ struct PopupState {
     updating_search: Cell<bool>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     application: &adw::Application,
     history: Rc<RefCell<TextHistory>>,
+    settings: Rc<SettingsService>,
+    writer: ClipboardWriter,
     on_restore: impl Fn(HistoryItemId) + 'static,
     keeps_keyboard_focus: impl Fn(&adw::ApplicationWindow) -> Option<bool> + 'static,
+    on_open_settings: impl Fn() + 'static,
 ) -> HistoryPopup {
     let window = adw::ApplicationWindow::builder()
         .application(application)
@@ -119,6 +131,9 @@ pub fn build(
         Some("Clear Unpinned History…"),
         Some("popup.clear-unpinned"),
     );
+    let settings_section = gio::Menu::new();
+    settings_section.append(Some("Preferences"), Some("popup.open-settings"));
+    menu.append_section(None, &settings_section);
     let menu_button = gtk::MenuButton::builder()
         .icon_name("view-more-symbolic")
         .tooltip_text("More options")
@@ -173,6 +188,28 @@ pub fn build(
     placeholder.append(&placeholder_title);
     placeholder.append(&placeholder_body);
 
+    // Discreet, hidden unless recording is paused: tells the user why new
+    // copies stop appearing without a full banner taking over the popup.
+    let paused_label = gtk::Label::builder()
+        .label("History paused")
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    paused_label.add_css_class("dim-label");
+    paused_label.add_css_class("caption");
+    let paused_resume = gtk::Button::builder().label("Resume").build();
+    paused_resume.add_css_class("flat");
+    let paused_indicator = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .margin_start(12)
+        .margin_end(6)
+        .margin_bottom(4)
+        .visible(false)
+        .build();
+    paused_indicator.append(&paused_label);
+    paused_indicator.append(&paused_resume);
+
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
@@ -181,6 +218,7 @@ pub fn build(
     // Clips row highlights and the list to the rounded corners.
     content.set_overflow(gtk::Overflow::Hidden);
     content.append(&header);
+    content.append(&paused_indicator);
     content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     content.append(&scrolled);
     content.append(&placeholder);
@@ -191,12 +229,16 @@ pub fn build(
     }
 
     let clear_action = gio::SimpleAction::new("clear-unpinned", None);
+    let open_settings_action = gio::SimpleAction::new("open-settings", None);
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&clear_action);
+    actions.add_action(&open_settings_action);
     window.insert_action_group("popup", Some(&actions));
 
     let state = Rc::new(PopupState {
         history,
+        settings,
+        writer,
         window: window.clone(),
         search: search.clone(),
         list: list.clone(),
@@ -204,13 +246,28 @@ pub fn build(
         placeholder,
         placeholder_title,
         placeholder_body,
+        paused_indicator,
         clear_action: clear_action.clone(),
         visible: RefCell::new(Vec::new()),
         restore: Box::new(on_restore),
+        open_settings: Box::new(on_open_settings),
         keeps_keyboard_focus: Box::new(keeps_keyboard_focus),
         suppression_depth: Cell::new(0),
         deferred_hide_check: Cell::new(false),
         updating_search: Cell::new(false),
+    });
+
+    paused_resume.connect_clicked({
+        let state = Rc::downgrade(&state);
+
+        move |_| {
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            state.settings.set_recording_paused(false);
+            state.writer.cancel_pending_self_write();
+            state.update_paused_indicator();
+        }
     });
 
     search.connect_search_changed({
@@ -262,6 +319,17 @@ pub fn build(
         move |_, _| {
             if let Some(state) = state.upgrade() {
                 state.confirm_clear_unpinned();
+            }
+        }
+    });
+
+    open_settings_action.connect_activate({
+        let state = Rc::downgrade(&state);
+
+        move |_, _| {
+            if let Some(state) = state.upgrade() {
+                state.hide();
+                (state.open_settings)();
             }
         }
     });
@@ -341,6 +409,7 @@ impl HistoryPopup {
 
 impl PopupState {
     fn rebuild(self: &Rc<Self>, prefer: Option<HistoryItemId>, fallback_index: usize) {
+        self.update_paused_indicator();
         let query = HistoryQuery::new(&self.search.text());
         let keep_list_focus = self.focus_within(&self.list);
 
@@ -393,6 +462,11 @@ impl PopupState {
                 }
             },
         )
+    }
+
+    fn update_paused_indicator(&self) {
+        self.paused_indicator
+            .set_visible(self.settings.recording_paused());
     }
 
     fn update_placeholder(&self, history_is_empty: bool, results_are_empty: bool) {

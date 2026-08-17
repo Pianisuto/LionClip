@@ -20,6 +20,7 @@ Usage:
   lionclip show     show the clipboard history popup
   lionclip hide     hide the popup and keep the instance resident
   lionclip toggle   show the popup when it is hidden, hide it when it is visible
+  lionclip settings open the preferences window
 
 Options:
   -h, --help        print this help
@@ -29,7 +30,7 @@ Every invocation is delivered to the single resident instance, which owns the
 only clipboard monitor. `toggle` is the command to bind to Super+V.
 ";
 
-pub const USAGE: &str = "usage: lionclip [show | hide | toggle] [--help] [--version]";
+pub const USAGE: &str = "usage: lionclip [show | hide | toggle | settings] [--help] [--version]";
 
 /// What the caller asked the resident instance to do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +41,9 @@ pub enum Command {
     Show,
     Hide,
     Toggle,
+    /// Opens (or focuses, if already open) the preferences window. Does not
+    /// affect the popup, so it has no `PopupIntent`.
+    Settings,
 }
 
 /// A command line that the invoked process answers by itself, without a
@@ -94,6 +98,9 @@ impl Command {
             // it again would re-place the window the compositor already mapped.
             Self::Toggle if popup_visible => PopupIntent::Hide,
             Self::Toggle => PopupIntent::Show,
+            // Settings is handled before `intent` is ever consulted; see
+            // `AppState::apply`. It never touches the popup either way.
+            Self::Settings => PopupIntent::Leave,
         }
     }
 }
@@ -118,6 +125,7 @@ where
         "show" => Command::Show,
         "hide" => Command::Hide,
         "toggle" => Command::Toggle,
+        "settings" => Command::Settings,
         other => return Err(Answer::Invalid(format!("unknown command '{other}'"))),
     };
 
@@ -150,6 +158,13 @@ mod tests {
         assert_eq!(parse_args(&["show"]), Ok(Command::Show));
         assert_eq!(parse_args(&["hide"]), Ok(Command::Hide));
         assert_eq!(parse_args(&["toggle"]), Ok(Command::Toggle));
+    }
+
+    #[test]
+    fn settings_command_is_recognized_and_never_touches_the_popup() {
+        assert_eq!(parse_args(&["settings"]), Ok(Command::Settings));
+        assert_eq!(Command::Settings.intent(false), PopupIntent::Leave);
+        assert_eq!(Command::Settings.intent(true), PopupIntent::Leave);
     }
 
     #[test]

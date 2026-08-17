@@ -45,6 +45,14 @@ pub struct TextHistory {
     image_storage_limit: u64,
     persistence: Option<PersistenceWorker>,
     image_cleanup: Option<ImageCleanupCoordinator>,
+    /// Bumped by [`Self::clear_unpinned`] and [`Self::clear_all`]. An
+    /// in-flight asynchronous capture (image processing, or a clipboard text
+    /// read still awaiting its future) snapshots this before it starts and
+    /// compares it again right before inserting; a mismatch means a bulk
+    /// clear ran while the capture was in flight, so the capture is dropped
+    /// instead of reappearing right after the clear that was supposed to
+    /// remove it.
+    generation: u64,
 }
 
 impl Default for TextHistory {
@@ -63,27 +71,31 @@ impl TextHistory {
     #[cfg(test)]
     pub(crate) fn persistent(paths: StoragePaths) -> Result<Self, PersistenceError> {
         let cleanup = ImageCleanupCoordinator::new(paths.clone());
-        Self::persistent_with_cleanup(paths, cleanup)
+        Self::persistent_with_cleanup(paths, DEFAULT_UNPINNED_LIMIT, cleanup)
     }
 
     pub(crate) fn persistent_with_cleanup(
         paths: StoragePaths,
+        unpinned_limit: usize,
         image_cleanup: ImageCleanupCoordinator,
     ) -> Result<Self, PersistenceError> {
         let (persistence, items) = PersistenceWorker::open(paths)?;
         Ok(Self::from_items(
             items,
-            DEFAULT_UNPINNED_LIMIT,
+            unpinned_limit,
             MAX_IMAGE_STORAGE_BYTES,
             Some(persistence),
             Some(image_cleanup),
         ))
     }
 
-    pub(crate) fn in_memory_with_cleanup(image_cleanup: ImageCleanupCoordinator) -> Self {
+    pub(crate) fn in_memory_with_cleanup(
+        unpinned_limit: usize,
+        image_cleanup: ImageCleanupCoordinator,
+    ) -> Self {
         Self::from_items(
             Vec::new(),
-            DEFAULT_UNPINNED_LIMIT,
+            unpinned_limit,
             MAX_IMAGE_STORAGE_BYTES,
             None,
             Some(image_cleanup),
@@ -108,6 +120,7 @@ impl TextHistory {
             image_storage_limit,
             persistence,
             image_cleanup,
+            generation: 0,
         };
         let mut removed_ids = history.enforce_image_storage_limit();
         removed_ids.extend(history.enforce_retention());
@@ -211,6 +224,7 @@ impl TextHistory {
         if !self.has_unpinned() {
             return HistoryChange::Rejected;
         }
+        self.generation = self.generation.wrapping_add(1);
         let removed_ids = self
             .items
             .iter()
@@ -223,8 +237,53 @@ impl TextHistory {
         HistoryChange::Applied
     }
 
+    /// Removes every item, pinned or not. Used by the Preferences "Clear
+    /// history" action; the popup's own overflow menu only ever offers the
+    /// narrower [`Self::clear_unpinned`].
+    pub fn clear_all(&mut self) -> HistoryChange {
+        if self.items.is_empty() {
+            return HistoryChange::Rejected;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let removed_ids = self
+            .items
+            .iter()
+            .map(TextHistoryItem::id)
+            .collect::<Vec<_>>();
+        self.remove_ids(&removed_ids);
+        self.persist(PersistenceMutation::ClearAll);
+        self.flush_image_cleanup();
+        HistoryChange::Applied
+    }
+
     pub fn has_unpinned(&self) -> bool {
         self.items.iter().any(|item| !item.is_pinned())
+    }
+
+    /// Snapshot other in-flight work can compare itself against; see the
+    /// field doc on [`TextHistory::generation`].
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Applies a new unpinned-item cap immediately: existing history over
+    /// the new limit is evicted right away, the same way retention already
+    /// runs after every insert, rather than waiting for the next capture.
+    pub fn set_unpinned_limit(&mut self, limit: usize) {
+        if self.unpinned_limit == limit {
+            return;
+        }
+        self.unpinned_limit = limit;
+        let removed_ids = self.enforce_retention();
+        if !removed_ids.is_empty() {
+            self.persist(PersistenceMutation::Delete { removed_ids });
+        }
+        self.flush_image_cleanup();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unpinned_limit(&self) -> usize {
+        self.unpinned_limit
     }
 
     pub(crate) fn flush_image_cleanup(&self) {
@@ -479,5 +538,79 @@ mod tests {
         );
         assert_eq!(history.items().len(), 1);
         assert_eq!(history.items()[0].id(), id);
+    }
+
+    #[test]
+    fn clear_unpinned_keeps_pinned_items_and_is_rejected_when_nothing_would_change() {
+        let mut history = TextHistory::default();
+        history.record("kept".into());
+        let pinned_id = history.items()[0].id();
+        history.pin(pinned_id);
+        history.record("gone".into());
+
+        assert_eq!(history.clear_unpinned(), HistoryChange::Applied);
+        assert_eq!(history.items().len(), 1);
+        assert_eq!(history.items()[0].id(), pinned_id);
+        assert_eq!(history.clear_unpinned(), HistoryChange::Rejected);
+    }
+
+    #[test]
+    fn clear_all_removes_pinned_and_unpinned_and_is_rejected_when_already_empty() {
+        let mut history = TextHistory::default();
+        history.record("unpinned".into());
+        history.record("pinned".into());
+        let pinned_id = history.items()[0].id();
+        history.pin(pinned_id);
+
+        assert_eq!(history.clear_all(), HistoryChange::Applied);
+        assert!(history.items().is_empty());
+        assert_eq!(history.clear_all(), HistoryChange::Rejected);
+    }
+
+    #[test]
+    fn clear_unpinned_and_clear_all_each_bump_the_generation() {
+        let mut history = TextHistory::default();
+        history.record("A".into());
+        let generation = history.generation();
+
+        history.clear_unpinned();
+        assert_ne!(history.generation(), generation);
+
+        let generation = history.generation();
+        history.record("B".into());
+        history.clear_all();
+        assert_ne!(history.generation(), generation);
+    }
+
+    #[test]
+    fn set_unpinned_limit_applies_retention_immediately_and_preserves_pinned() {
+        let mut history =
+            TextHistory::from_items(Vec::new(), 500, MAX_IMAGE_STORAGE_BYTES, None, None);
+        for label in ["A", "B", "C"] {
+            history.record(label.into());
+        }
+        let pinned_id = history.items().last().unwrap().id();
+        history.pin(pinned_id);
+
+        history.set_unpinned_limit(1);
+
+        assert_eq!(history.unpinned_limit(), 1);
+        // The pinned item plus the single most recently used unpinned item.
+        assert_eq!(history.items().len(), 2);
+        assert!(history.items().iter().any(|item| item.id() == pinned_id));
+        assert!(
+            history
+                .items()
+                .iter()
+                .any(|item| item.as_text() == Some("C"))
+        );
+    }
+
+    #[test]
+    fn set_unpinned_limit_to_the_same_value_is_a_no_op() {
+        let mut history = TextHistory::default();
+        history.record("A".into());
+        history.set_unpinned_limit(DEFAULT_UNPINNED_LIMIT);
+        assert_eq!(history.items().len(), 1);
     }
 }

@@ -339,3 +339,18 @@ fn clearing_unpinned_history_is_persisted() {
     assert_eq!(texts(&reopened), ["pinned"]);
     assert!(reopened.items()[0].is_pinned());
 }
+
+#[test]
+fn clearing_all_history_removes_pinned_items_too_and_is_persisted() {
+    let storage = TestStorage::new("clear-all-restart");
+    let mut history = TextHistory::persistent(storage.paths.clone()).unwrap();
+    history.record("pinned".into());
+    let pinned_id = history.items()[0].id();
+    history.pin(pinned_id);
+    history.record("unpinned".into());
+    history.clear_all();
+    drop(history);
+
+    let reopened = TextHistory::persistent(storage.paths.clone()).unwrap();
+    assert!(reopened.items().is_empty());
+}

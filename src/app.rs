@@ -11,8 +11,10 @@ use crate::{
     clipboard::{ClipboardService, ClipboardWriter, HistoryChangedCallback},
     history::{HistoryPayload, TextHistory},
     image_cleanup::ImageCleanupCoordinator,
+    paste::{self, PasteCoordinator, PasteTarget},
     popup::{self, HistoryPopup},
     positioning::{PointerAnchor, Positioner, SessionDiagnostics},
+    settings::{SettingsService, build_preferences_window},
     storage::{self, StoragePaths},
     unix_signals,
 };
@@ -106,9 +108,17 @@ struct AppState {
     history: Rc<RefCell<TextHistory>>,
     popup: Rc<HistoryPopup>,
     positioner: Positioner,
+    paste: PasteCoordinator,
+    /// The single preferences window instance. Like the popup, it hides
+    /// rather than closes, so every `lionclip settings` invocation and every
+    /// "Preferences" menu click reuses it instead of building a second one.
+    settings_window: adw::PreferencesWindow,
     /// Pointer sample of the placement made before the popup was mapped, so the
     /// placement that runs at map time agrees with it.
     pending_anchor: Rc<Cell<Option<PointerAnchor>>>,
+    /// The auto-paste target captured the moment the popup was shown, before
+    /// its own window had a surface. See `PasteCoordinator::capture_target`.
+    pending_paste_target: Rc<Cell<Option<PasteTarget>>>,
     _clipboard_service: ClipboardService,
     _hold: gio::ApplicationHoldGuard,
 }
@@ -132,9 +142,11 @@ impl AppState {
         let diagnostics = SessionDiagnostics::collect();
         println!("{}", diagnostics.log_line());
 
+        let settings = Rc::new(SettingsService::open());
         let image_cleanup = ImageCleanupCoordinator::new(paths.clone());
         let history = Rc::new(RefCell::new(load_history(
             paths.clone(),
+            settings.history_limit() as usize,
             image_cleanup.clone(),
         )));
         let history_changed: HistoryChangedCallback = Rc::new(RefCell::new(None));
@@ -144,22 +156,69 @@ impl AppState {
             history_changed.clone(),
             paths,
             image_cleanup,
+            settings.clone(),
         );
         let writer: ClipboardWriter = clipboard_service.writer();
 
         let positioner = Positioner::new(&diagnostics);
+        let paste = PasteCoordinator::new(&diagnostics);
+        let pending_paste_target: Rc<Cell<Option<PasteTarget>>> = Rc::new(Cell::new(None));
+
+        // Built before the popup so the popup's "Preferences" menu item can
+        // hold a handle to it; it only ever needs `history_changed`'s shared
+        // callback cell to ask the popup to refresh, not the popup itself, so
+        // construction order between the two does not otherwise matter.
+        let settings_window = build_preferences_window(
+            application,
+            settings.clone(),
+            history.clone(),
+            writer.clone(),
+            paste.is_available(),
+            {
+                let history_changed = history_changed.clone();
+
+                move || {
+                    if let Some(callback) = history_changed.borrow().as_ref() {
+                        callback();
+                    }
+                }
+            },
+        );
+
         let popup = Rc::new(popup::build(
             application,
             history.clone(),
+            settings.clone(),
+            writer.clone(),
             {
                 let history = history.clone();
+                let settings = settings.clone();
+                let pending_paste_target = pending_paste_target.clone();
 
                 move |id| {
                     let payload = history.borrow().item(id).map(|item| item.payload().clone());
-                    match payload {
-                        Some(HistoryPayload::Text(text)) => writer.restore_text(&text),
-                        Some(HistoryPayload::Image(image)) => writer.restore_image(&image),
-                        None => {}
+                    // The target was captured once, when the popup opened;
+                    // it is not consumed here, because Up/Down navigation and
+                    // other non-activating interactions in between must not
+                    // change what a later activation pastes into.
+                    let target = pending_paste_target.get();
+                    let restored = match payload {
+                        Some(HistoryPayload::Text(text)) => Some(writer.restore_text(&text)),
+                        Some(HistoryPayload::Image(image)) => Some(writer.restore_image(&image)),
+                        None => None,
+                    };
+                    let Some(restore_succeeded) = restored else {
+                        return;
+                    };
+
+                    let behavior =
+                        paste::decide(settings.auto_paste(), target.is_some(), restore_succeeded);
+                    if let (paste::SelectionBehavior::RestoreAndPaste, Some(target)) =
+                        (behavior, target)
+                    {
+                        paste.request_paste(target, |sent| {
+                            println!("lionclip: auto-paste result sent={sent}");
+                        });
                     }
                 }
             },
@@ -167,6 +226,11 @@ impl AppState {
                 let positioner = positioner.clone();
 
                 move |window| positioner.holds_keyboard_focus(window)
+            },
+            {
+                let settings_window = settings_window.clone();
+
+                move || settings_window.present()
             },
         ));
 
@@ -203,7 +267,10 @@ impl AppState {
             history,
             popup,
             positioner,
+            paste,
+            settings_window,
             pending_anchor,
+            pending_paste_target,
             _clipboard_service: clipboard_service,
             _hold: application.hold(),
         })
@@ -211,6 +278,10 @@ impl AppState {
 
     /// Applies one command to the popup of the resident instance.
     fn apply(&self, command: Command) {
+        if command == Command::Settings {
+            self.settings_window.present();
+            return;
+        }
         match command.intent(self.popup.window.is_visible()) {
             PopupIntent::Show => self.show_popup(),
             PopupIntent::Hide => self.popup.hide(),
@@ -234,6 +305,11 @@ impl AppState {
             self.popup.focus_search();
             return;
         }
+
+        // Captured first, while the popup is confirmed not visible: the
+        // target is whatever held X input focus right before LionClip
+        // opened, not whatever ends up focused after it closes.
+        self.pending_paste_target.set(self.paste.capture_target());
 
         // Render the final content first, so both placements below measure the
         // popup the user is about to see.
@@ -259,15 +335,19 @@ impl AppState {
     }
 }
 
-fn load_history(paths: StoragePaths, image_cleanup: ImageCleanupCoordinator) -> TextHistory {
-    match TextHistory::persistent_with_cleanup(paths, image_cleanup.clone()) {
+fn load_history(
+    paths: StoragePaths,
+    unpinned_limit: usize,
+    image_cleanup: ImageCleanupCoordinator,
+) -> TextHistory {
+    match TextHistory::persistent_with_cleanup(paths, unpinned_limit, image_cleanup.clone()) {
         Ok(history) => history,
         Err(error) => {
             eprintln!(
                 "lionclip: persistence disabled stage={}",
                 error.diagnostic()
             );
-            TextHistory::in_memory_with_cleanup(image_cleanup)
+            TextHistory::in_memory_with_cleanup(unpinned_limit, image_cleanup)
         }
     }
 }

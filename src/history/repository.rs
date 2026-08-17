@@ -117,6 +117,7 @@ pub(super) enum PersistenceMutation {
         removed_ids: Vec<HistoryItemId>,
     },
     ClearUnpinned,
+    ClearAll,
 }
 
 enum WorkerCommand {
@@ -379,6 +380,11 @@ impl Repository {
                 transaction
                     .execute("DELETE FROM history_items WHERE pinned = 0", [])
                     .map_err(|_| PersistenceError::at("history-clear-unpinned"))?;
+            }
+            PersistenceMutation::ClearAll => {
+                transaction
+                    .execute("DELETE FROM history_items", [])
+                    .map_err(|_| PersistenceError::at("history-clear-all"))?;
             }
         }
         transaction

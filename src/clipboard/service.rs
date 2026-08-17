@@ -10,6 +10,7 @@ use crate::{
     history::{HistoryUpdate, ImageData, ImageMime, TextHistory},
     image_cleanup::ImageCleanupCoordinator,
     image_store::{self, MAX_IMAGE_ENCODED_BYTES},
+    settings::SettingsService,
     storage::StoragePaths,
 };
 
@@ -23,15 +24,32 @@ pub struct ClipboardWriter {
 }
 
 impl ClipboardWriter {
-    pub fn restore_text(&self, text: &str) {
+    /// Restores `text` to the clipboard. Always succeeds: `gdk::Clipboard`'s
+    /// text setter has no failure signal to report. Returns `bool` (always
+    /// `true`) rather than `()` so callers deciding whether to follow a
+    /// restore with an auto-paste attempt do not need a separate rule for
+    /// text versus images.
+    pub fn restore_text(&self, text: &str) -> bool {
         self.suppression.borrow_mut().arm_text(text);
         self.clipboard.set_text(text);
+        true
     }
 
-    pub fn restore_image(&self, image: &ImageData) {
+    /// Drops a self-write suppression armed by a restore that happened while
+    /// recording was paused: a paused clipboard handler returns before ever
+    /// consulting it, so it would otherwise stay armed and could wrongly
+    /// suppress the next real external copy after recording resumes.
+    pub fn cancel_pending_self_write(&self) {
+        self.suppression.borrow_mut().cancel();
+    }
+
+    /// Restores `image` to the clipboard, returning whether it actually
+    /// succeeded. An auto-paste attempt must never follow a restore that
+    /// silently failed.
+    pub fn restore_image(&self, image: &ImageData) -> bool {
         let Some(path) = image_store::blob_path(&self.paths, image) else {
             eprintln!("lionclip: image restore failed stage=invalid-blob-key");
-            return;
+            return false;
         };
 
         // Restoration must complete before the popup closes: otherwise a fast
@@ -42,7 +60,7 @@ impl ClipboardWriter {
             Ok(bytes) => bytes,
             Err(_) => {
                 eprintln!("lionclip: image restore failed stage=blob-read");
-                return;
+                return false;
             }
         };
         let bytes = glib::Bytes::from_owned(bytes);
@@ -53,7 +71,9 @@ impl ClipboardWriter {
         if self.clipboard.set_content(Some(&provider)).is_err() {
             self.suppression.borrow_mut().cancel();
             eprintln!("lionclip: image restore failed stage=clipboard-set");
+            return false;
         }
+        true
     }
 }
 
@@ -70,6 +90,7 @@ impl ClipboardService {
         history_changed: HistoryChangedCallback,
         paths: StoragePaths,
         image_cleanup: ImageCleanupCoordinator,
+        settings: Rc<SettingsService>,
     ) -> Self {
         let suppression = Rc::new(RefCell::new(SelfWriteSuppression::default()));
         let writer = ClipboardWriter {
@@ -86,16 +107,28 @@ impl ClipboardService {
             let change_sequence = change_sequence.clone();
             let paths = paths.clone();
             let image_cleanup = image_cleanup.clone();
+            let settings = settings.clone();
 
             move |clipboard| {
+                // Paused recording does no work at all, not even inspecting
+                // the offered formats: nothing here may read or decode a
+                // payload while the user asked LionClip to stop capturing.
+                if settings.recording_paused() {
+                    return;
+                }
+
                 let sequence = change_sequence.get().wrapping_add(1);
                 change_sequence.set(sequence);
+                let generation = history.borrow().generation();
 
-                if let Some(mime_type) = preferred_image_mime(clipboard) {
+                if settings.save_images()
+                    && let Some(mime_type) = preferred_image_mime(clipboard)
+                {
                     capture_image(
                         clipboard.clone(),
                         mime_type,
                         sequence,
+                        generation,
                         change_sequence.clone(),
                         history.clone(),
                         history_changed.clone(),
@@ -104,9 +137,15 @@ impl ClipboardService {
                         image_cleanup.clone(),
                     );
                 } else {
+                    // Also the path taken when an image is offered but
+                    // `save_images` is off: it reads whatever plain-text
+                    // representation the clipboard offers alongside the
+                    // image, rather than discarding useful text just
+                    // because an ignored image was offered too.
                     capture_text(
                         clipboard.clone(),
                         sequence,
+                        generation,
                         change_sequence.clone(),
                         history.clone(),
                         history_changed.clone(),
@@ -156,6 +195,7 @@ fn preferred_image_mime(clipboard: &gdk::Clipboard) -> Option<ImageMime> {
 fn capture_text(
     clipboard: gdk::Clipboard,
     sequence: u64,
+    generation: u64,
     change_sequence: Rc<Cell<u64>>,
     history: Rc<RefCell<TextHistory>>,
     history_changed: HistoryChangedCallback,
@@ -176,6 +216,12 @@ fn capture_text(
         if suppression.borrow_mut().should_suppress_text(&text) {
             return;
         }
+        // A bulk clear (Preferences "Clear history", or the popup's "Clear
+        // unpinned") that ran while this read was in flight must not have a
+        // just-cleared item reappear because a stale capture finishes late.
+        if history.borrow().generation() != generation {
+            return;
+        }
         let update = history.borrow_mut().record(text);
         notify_if_changed(update, &history_changed);
     });
@@ -186,6 +232,7 @@ fn capture_image(
     clipboard: gdk::Clipboard,
     requested_mime: ImageMime,
     sequence: u64,
+    generation: u64,
     change_sequence: Rc<Cell<u64>>,
     history: Rc<RefCell<TextHistory>>,
     history_changed: HistoryChangedCallback,
@@ -205,6 +252,7 @@ fn capture_image(
             clipboard,
             requested_mime,
             sequence,
+            generation,
             change_sequence,
             history,
             history_changed,
@@ -223,6 +271,7 @@ async fn capture_image_task(
     clipboard: gdk::Clipboard,
     requested_mime: ImageMime,
     sequence: u64,
+    generation: u64,
     change_sequence: Rc<Cell<u64>>,
     history: Rc<RefCell<TextHistory>>,
     history_changed: HistoryChangedCallback,
@@ -239,6 +288,7 @@ async fn capture_image_task(
             fallback_to_text(
                 clipboard,
                 sequence,
+                generation,
                 change_sequence,
                 history,
                 history_changed,
@@ -266,6 +316,7 @@ async fn capture_image_task(
             fallback_to_text(
                 clipboard,
                 sequence,
+                generation,
                 change_sequence,
                 history,
                 history_changed,
@@ -282,6 +333,7 @@ async fn capture_image_task(
         fallback_to_text(
             clipboard,
             sequence,
+            generation,
             change_sequence,
             history,
             history_changed,
@@ -306,6 +358,7 @@ async fn capture_image_task(
             fallback_to_text(
                 clipboard,
                 sequence,
+                generation,
                 change_sequence,
                 history,
                 history_changed,
@@ -318,6 +371,7 @@ async fn capture_image_task(
             fallback_to_text(
                 clipboard,
                 sequence,
+                generation,
                 change_sequence,
                 history,
                 history_changed,
@@ -338,7 +392,13 @@ async fn capture_image_task(
         return;
     }
 
-    let update = history.borrow_mut().record_image(stored.image.clone());
+    // Same bulk-clear guard as `capture_text`, covering the much longer
+    // window an image capture spends decoding and writing its blob.
+    let update = if history.borrow().generation() == generation {
+        history.borrow_mut().record_image(stored.image.clone())
+    } else {
+        HistoryUpdate::Rejected
+    };
     if matches!(update, HistoryUpdate::Rejected) {
         image_cleanup.queue(stored.image);
     }
@@ -348,6 +408,7 @@ async fn capture_image_task(
 fn fallback_to_text(
     clipboard: gdk::Clipboard,
     sequence: u64,
+    generation: u64,
     change_sequence: Rc<Cell<u64>>,
     history: Rc<RefCell<TextHistory>>,
     history_changed: HistoryChangedCallback,
@@ -359,6 +420,7 @@ fn fallback_to_text(
     capture_text(
         clipboard,
         sequence,
+        generation,
         change_sequence,
         history,
         history_changed,
