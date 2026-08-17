@@ -101,6 +101,27 @@ impl SettingsService {
         }
     }
 
+    /// Calls `handler` with the new, snapped limit every time the stored
+    /// history limit changes — including changes this process did not make,
+    /// such as `gsettings set io.github.Pianisuto.LionClip history-limit
+    /// 100` or dconf-editor. GSettings already delivers those, so reacting
+    /// to them needs no polling; without this the resident `TextHistory`
+    /// would keep enforcing the old limit until the next restart, while the
+    /// persisted value and the preferences window showed the new one.
+    ///
+    /// The subscription lives as long as the `gio::Settings` this service
+    /// owns, which is the whole process, so there is no handler id to keep.
+    /// Does nothing when settings fell back to in-memory defaults: there is
+    /// no backend to change them from the outside (see [`Backing`]).
+    pub fn connect_history_limit_changed(&self, handler: impl Fn(u32) + 'static) {
+        let Backing::GSettings(settings) = &self.backing else {
+            return;
+        };
+        settings.connect_changed(Some(KEY_HISTORY_LIMIT), move |settings, _| {
+            handler(nearest_history_limit(settings.int(KEY_HISTORY_LIMIT)));
+        });
+    }
+
     pub fn save_images(&self) -> bool {
         match &self.backing {
             Backing::GSettings(settings) => settings.boolean(KEY_SAVE_IMAGES),
@@ -163,6 +184,10 @@ impl SettingsService {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gtk::glib;
+
     use super::*;
 
     #[test]
@@ -207,6 +232,54 @@ mod tests {
         let settings = SettingsService::open_for_test();
         settings.set_history_limit(733);
         assert_eq!(settings.history_limit(), 500);
+    }
+
+    /// Subscribers are notified through the settings backend, which
+    /// dispatches on the main context that was thread-default when the
+    /// `gio::Settings` was constructed. Owning a private context for the
+    /// whole exchange makes that dispatch run inline, so the test observes
+    /// the notification without a main loop and without touching the
+    /// process-wide default context other tests may be iterating.
+    fn with_owned_main_context<R>(body: impl FnOnce() -> R) -> R {
+        glib::MainContext::new()
+            .with_thread_default(body)
+            .expect("acquire a private main context")
+    }
+
+    #[test]
+    fn history_limit_changes_notify_subscribers() {
+        with_owned_main_context(|| {
+            let settings = SettingsService::open_for_test();
+            let observed: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
+            settings.connect_history_limit_changed({
+                let observed = observed.clone();
+                move |limit| observed.borrow_mut().push(limit)
+            });
+
+            // Stands in for the external `gsettings set ... history-limit`
+            // case: the subscriber has to hear about the write regardless of
+            // who made it, since it is the only thing that tells the resident
+            // history to shrink.
+            settings.set_history_limit(100);
+
+            assert_eq!(*observed.borrow(), [100]);
+        });
+    }
+
+    #[test]
+    fn subscribers_only_ever_see_snapped_history_limits() {
+        with_owned_main_context(|| {
+            let settings = SettingsService::open_for_test();
+            let observed: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
+            settings.connect_history_limit_changed({
+                let observed = observed.clone();
+                move |limit| observed.borrow_mut().push(limit)
+            });
+
+            settings.set_history_limit(733);
+
+            assert_eq!(*observed.borrow(), [500]);
+        });
     }
 
     #[test]

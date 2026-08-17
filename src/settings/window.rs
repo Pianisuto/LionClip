@@ -230,6 +230,12 @@ fn connect_handlers(
                 return;
             };
             rows.settings.set_history_limit(limit);
+            // `AppState` also applies this through the settings' own change
+            // notification, which is what makes an external `gsettings`
+            // write reach the running history. Applying it here as well is
+            // idempotent, and it is the only path left when settings fell
+            // back to in-memory defaults, where there is no backend to
+            // notify from.
             history.borrow_mut().set_unpinned_limit(limit as usize);
             on_history_changed();
         }

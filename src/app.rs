@@ -291,6 +291,25 @@ impl AppState {
             }
         }));
 
+        // The resident history, not the preferences window, is what has to
+        // follow the stored limit: a `gsettings`/dconf write from outside
+        // this process changes the persisted value and what Preferences
+        // shows the next time it opens, but nothing else would tell the
+        // running `TextHistory` to shrink. Subscribing to the key itself
+        // covers both origins with one path, and needs no polling because
+        // GSettings already delivers the change.
+        settings.connect_history_limit_changed({
+            let history = history.clone();
+            let history_changed = history_changed.clone();
+
+            move |limit| {
+                history.borrow_mut().set_unpinned_limit(limit as usize);
+                if let Some(callback) = history_changed.borrow().as_ref() {
+                    callback();
+                }
+            }
+        });
+
         Some(Self {
             history,
             popup,
