@@ -1,359 +1,223 @@
-# LionClip
+<p align="center">
+  <img src="packaging/icons/io.github.Pianisuto.LionClip.svg" alt="Ícone do LionClip" width="112" height="112">
+</p>
 
-A small, fast, native clipboard history utility for Linux desktops, initially focused on **GNOME/Zorin OS**.
+<h1 align="center">LionClip</h1>
 
-LionClip is being built around one simple interaction:
+<p align="center">
+  Histórico da área de transferência rápido, nativo e privado para Linux.
+</p>
 
-> Press `Super+V`, get a clean clipboard history popup near the pointer, choose an item, and continue working.
+<p align="center">
+  <a href="https://github.com/Pianisuto/LionClip/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Pianisuto/LionClip?display_name=tag&sort=semver"></a>
+  <a href="https://github.com/Pianisuto/LionClip/actions/workflows/rust.yml"><img alt="CI" src="https://github.com/Pianisuto/LionClip/actions/workflows/rust.yml/badge.svg"></a>
+  <img alt="Linux GNOME/Zorin" src="https://img.shields.io/badge/plataforma-Linux%20%C2%B7%20GNOME%2FZorin-6f5af0">
+  <img alt="Dados locais" src="https://img.shields.io/badge/dados-100%25%20locais-35b779">
+</p>
 
-The project intentionally avoids becoming a large automation or scripting platform. The goal is to provide the clipboard-history experience that should feel native to the desktop: fast, predictable, keyboard-friendly, and visually consistent with GNOME.
+O **LionClip** traz uma experiência de histórico da área de transferência no estilo `Win+V` para Linux, com foco inicial em **Zorin OS / GNOME**. Pressione `Super+V`, encontre o que copiou e continue trabalhando sem abrir um aplicativo tradicional.
 
-## Install
+Tudo fica local no computador: textos, imagens, preferências e histórico persistente. Sem conta, nuvem, telemetria ou serviço remoto.
 
-LionClip ships as a `.deb` for Ubuntu 24.04 and Zorin OS based on `noble`,
-`amd64`. You do not need Rust or Cargo to install it.
+## Recursos
 
-Download `lionclip_<version>_amd64.deb`, or build it yourself (see
-[Development](#development)), then:
+- histórico persistente de textos em SQLite;
+- screenshots e imagens PNG/JPEG com thumbnails;
+- busca instantânea enquanto digita;
+- navegação completa por teclado e mouse;
+- fixar, excluir e limpar itens do histórico;
+- deduplicação e limites configuráveis de retenção;
+- popup compacto próximo ao ponteiro no GNOME/X11;
+- `Super+V` configurável por helper próprio, sem extensão do GNOME Shell;
+- inicialização automática com o sistema;
+- preferências nativas em Libadwaita;
+- pausa da captura e opção para ignorar novas imagens;
+- **auto-paste opcional no X11**, desligado por padrão;
+- processo residente único, sem polling agressivo do clipboard.
+
+## Instalação
+
+Baixe a versão mais recente na página de [Releases](https://github.com/Pianisuto/LionClip/releases).
+
+O pacote atual é para **Ubuntu 24.04 / Zorin OS baseado em Noble, amd64**:
 
 ```bash
 sudo apt install ./lionclip_0.1.0_amd64.deb
 ```
 
-`apt` pulls in the GTK4, Libadwaita and GDK-Pixbuf libraries LionClip needs.
-The package installs:
+O `.deb` instala o aplicativo, ícone, launcher, autostart, schema de preferências e o helper do atalho.
 
-| Path | What it is |
-| --- | --- |
-| `/usr/bin/lionclip` | the application |
-| `/usr/bin/lionclip-shortcut` | the `Super+V` setup helper |
-| `/usr/share/applications/io.github.Pianisuto.LionClip.desktop` | app launcher entry |
-| `/etc/xdg/autostart/io.github.Pianisuto.LionClip.desktop` | starts LionClip at login |
-| `/usr/share/icons/hicolor/*/apps/io.github.Pianisuto.LionClip.{svg,png}` | icon |
-| `/usr/share/metainfo/io.github.Pianisuto.LionClip.metainfo.xml` | AppStream metadata |
-| `/usr/share/doc/lionclip/` | `README.Debian`, changelog, copyright |
+### Primeiro uso
 
-## First setup
-
-**Autostart** is already configured: the installed autostart entry runs
-`lionclip` at each login, which starts the resident instance and its clipboard
-monitor *without* opening the popup. Log out and back in once after installing,
-or start it now with:
+O LionClip inicia automaticamente nos próximos logins. Para iniciar imediatamente:
 
 ```bash
 setsid lionclip >/dev/null 2>&1 &
 ```
 
-**`Super+V`** is not bound automatically. The helper does it, and refuses to
-take a shortcut away from anything without being asked:
+Configure `Super+V`:
 
 ```bash
 lionclip-shortcut install
 ```
 
-If GNOME still uses `Super+V` for its notification list, the helper says so and
-stops. Re-run it as `lionclip-shortcut install --take-over` to hand the key
-over, or bind LionClip to another key yourself in
-*Settings → Keyboard → Keyboard Shortcuts → Custom Shortcuts* with the command
-`lionclip toggle`.
+Se o GNOME já estiver usando `Super+V` para notificações, o helper não sobrescreve nada sem permissão. Para assumir o atalho explicitamente:
 
-Check or undo it any time:
+```bash
+lionclip-shortcut install --take-over
+```
+
+Verifique ou remova a configuração a qualquer momento:
 
 ```bash
 lionclip-shortcut status
 lionclip-shortcut remove
 ```
 
-## Usage
+## Uso
 
-Press `Super+V`. The popup opens near the pointer with the newest item
-selected; press `Super+V` again to close it.
+Pressione `Super+V` para abrir o histórico e novamente para fechar.
 
-- **search** — just type; the list filters as you type
-- **navigate** — `Up`/`Down`, or the mouse
-- **restore** — `Enter` or click, then paste normally with `Ctrl+V`
-- **dismiss** — `Escape` (clears a non-empty search first), or click away
-- **pin** — `Ctrl+P`, or the pin button on the row; pinned items stay on top and
-  are never dropped by the history limit
-- **delete** — `Delete` while a row has focus
-- **clear** — the overflow menu next to the search field clears unpinned items
-- **images** — screenshots and copied PNG/JPEG images appear as thumbnails and
-  are restored as the original image
-- **preferences** — the overflow menu's *Preferences* item opens a small
-  settings window: history limit, save-images, pause recording,
-  automatically paste selected items (X11 only), start at login, and clear
-  history
+- **buscar:** digite normalmente;
+- **navegar:** `↑` / `↓`;
+- **restaurar:** `Enter` ou clique no item;
+- **fechar:** `Escape` ou clique fora;
+- **fixar:** `Ctrl+P` ou botão de pin;
+- **excluir:** `Delete`;
+- **imagens:** screenshots e imagens copiadas aparecem como thumbnails e são restauradas no formato original;
+- **preferências:** menu `⋮` → **Preferences**.
 
-From a terminal or a script:
+Por padrão, selecionar um item apenas o restaura para o clipboard. Depois use `Ctrl+V` normalmente. No X11, a preferência **Automatically paste selected items** pode fazer essa colagem automaticamente; ela permanece desativada por padrão por segurança. Veja [`SECURITY.md`](SECURITY.md).
+
+### Linha de comando
 
 ```bash
-lionclip           # start the resident instance, no popup
-lionclip show      # show the popup
-lionclip hide      # hide the popup, keep running
-lionclip toggle    # show it when hidden, hide it when visible
-lionclip settings  # open (or focus) the preferences window
+lionclip           # inicia a instância residente sem abrir o popup
+lionclip show      # mostra o popup
+lionclip hide      # esconde o popup
+lionclip toggle    # alterna entre mostrar e esconder
+lionclip settings  # abre/foca Preferências
 ```
 
-Every invocation talks to the one resident instance, so there is never a second
-clipboard monitor or a second preferences window.
+Todas as chamadas conversam com a mesma instância residente.
 
-## Preferences
+## Preferências
 
-Settings persist through GSettings and apply immediately, without a restart:
+As configurações persistem via GSettings e são aplicadas sem reiniciar o aplicativo:
 
-- **history limit** — 100/250/500/1000 unpinned items; lowering it evicts the
-  oldest unpinned items (and their stored images) right away, pinned items are
-  never affected. Changing it with `gsettings` or dconf-editor instead of the
-  window applies to the running instance just the same, with no restart and
-  without opening Preferences;
-- **save copied images** — off stops capturing new images while keeping the
-  ones already in history; a plain-text representation offered alongside an
-  ignored image is still captured;
-- **pause clipboard recording** — stops new captures without disabling
-  restore, search, pin, delete or clear; the popup shows a small "History
-  paused" indicator with a *Resume* button while it is on;
-- **automatically paste selected items** — off by default; when on, choosing
-  a history item also asks the application that was focused before LionClip
-  opened to paste it. Available on X11 only in this release: on Wayland the
-  toggle is disabled and selecting an item only restores the clipboard, the
-  same as with the setting off;
-- **start LionClip at login** — writes or removes a per-user
-  `~/.config/autostart` override on top of the package's system-wide
-  autostart entry; no root needed;
-- **clear history…** — removes all clipboard history, including pinned items
-  and stored images, after a confirmation. The popup's own overflow menu
-  keeps the narrower *Clear Unpinned History…*.
+- limite do histórico: 100 / 250 / 500 / 1000 itens não fixados;
+- salvar ou ignorar novas imagens copiadas;
+- pausar e retomar a captura do histórico;
+- colar automaticamente ao selecionar — **X11 apenas**;
+- iniciar com o sistema;
+- limpar todo o histórico, inclusive itens fixados e imagens armazenadas.
 
-No setting reaches the network. See
-[`docs/PHASE6_VALIDATION.md`](docs/PHASE6_VALIDATION.md) for the manual QA
-checklist and the auto-paste safety design.
+Itens fixados não são removidos pelo limite normal de retenção.
 
-## Upgrade
+## Privacidade
+
+O LionClip não envia conteúdo da área de transferência para servidores externos e não possui telemetria.
+
+O histórico fica em `$XDG_DATA_HOME/lionclip`, normalmente:
+
+```text
+~/.local/share/lionclip
+```
+
+A remoção do pacote preserva esses dados de propósito. Para apagá-los manualmente:
 
 ```bash
-sudo apt install ./lionclip_<newer-version>_amd64.deb
+rm -rf ~/.local/share/lionclip
 ```
 
-Installing over an existing version replaces the files on disk but does not
-restart a LionClip that is already running — the running process keeps the code
-it started with. Log out and back in, or restart it explicitly:
+## Atualização e remoção
+
+Para atualizar, instale o `.deb` novo por cima do atual:
 
 ```bash
-pkill -x lionclip && setsid lionclip >/dev/null 2>&1 &
+sudo apt install ./lionclip_<versao>_amd64.deb
 ```
 
-Reinstalling the same version works the same way.
+Uma instância já em execução continua usando o binário antigo até reiniciar ou fazer logout/login.
 
-## Uninstall
-
-Drop the `Super+V` binding first, while the helper is still installed —
-otherwise the shortcut stays behind in GSettings pointing at a command that no
-longer exists:
+Antes de desinstalar, remova o atalho do GNOME enquanto o helper ainda existe:
 
 ```bash
 lionclip-shortcut remove
 sudo apt remove lionclip
 ```
 
-`remove` takes the program, the launcher entry, the icon and the autostart entry
-with it. `sudo apt purge lionclip` additionally drops the package's own
-bookkeeping; there is nothing else left in `/etc` for it to clean.
+Use `sudo apt purge lionclip` se também quiser remover o bookkeeping do pacote. O histórico pessoal continua preservado até você apagá-lo explicitamente.
 
-Neither touches your clipboard history.
+## Plataforma
 
-## Remove personal data
+O alvo principal validado é:
 
-Your history lives in `$XDG_DATA_HOME/lionclip`, normally
-`~/.local/share/lionclip`: the SQLite database and the stored images. Package
-removal deliberately leaves it alone. Delete it yourself when you want it gone:
+- Zorin OS baseado em Ubuntu 24.04 (`noble`);
+- GNOME;
+- sessão X11;
+- arquitetura amd64.
 
-```bash
-rm -rf ~/.local/share/lionclip
-```
+No X11, o popup pode ser posicionado próximo ao ponteiro e o auto-paste opcional possui backend próprio. No Wayland nativo, o compositor controla a posição do popup e o auto-paste fica indisponível; restaurar o clipboard continua funcionando normalmente. XWayland permanece experimental.
 
-## Status
+## Desenvolvimento
 
-**Early development / Phase 6 implemented, pending manual validation on the
-target machine for auto-paste.**
-
-Phase 0 validated pointer-relative popup placement on the real target machine:
-Zorin OS with GNOME/X11. Native GNOME Wayland uses a safe compositor-managed
-fallback because exact top-level placement is unavailable through the current
-approach. XWayland inside a Wayland session remains experimental and has not
-yet been validated. Text and image clipboard history is event-driven,
-exact-content deduplicated, bounded, and persisted locally in SQLite across
-restarts.
-
-The popup behaves like a small system surface: type to search instantly, arrows
-to navigate, `Enter` to restore, `Escape` to clear the search and then dismiss,
-`Delete` to remove an item, `Ctrl+P` to pin, and a restrained overflow menu to
-clear unpinned history and open Preferences. Pinned items are kept first and
-are exempt from the retention limit.
-
-A native Libadwaita Preferences window (see [Preferences](#preferences) above)
-covers history limit, save-images, pause recording, automatic paste and
-start-at-login, plus a destructive clear-history control. Settings persist
-through GSettings; retention period by wall-clock days was deliberately left
-out because the history model only has logical sequences, not real
-timestamps, and manufacturing fake ones just for that would be worse than not
-having the feature.
-
-See [`docs/PHASE0_VALIDATION.md`](docs/PHASE0_VALIDATION.md) for native build
-dependencies, the recorded Phase 0 result, positioning diagnostics, and the
-optional Wayland/XWayland test matrix,
-[`docs/PHASE5_VALIDATION.md`](docs/PHASE5_VALIDATION.md) for the desktop
-integration and packaging test script, and
-[`docs/PHASE6_VALIDATION.md`](docs/PHASE6_VALIDATION.md) for the preferences
-and auto-paste manual QA checklist.
-
-## Product principles
-
-- **Fast by default** — near-zero idle CPU and an effectively instant popup.
-- **Native UI** — GTK4 + Libadwaita, following the system light/dark appearance.
-- **Keyboard first** — `Super+V`, arrows, Enter, Escape, search as you type.
-- **Mouse friendly** — the popup should appear near the pointer whenever the platform allows it.
-- **Private and local** — clipboard history stays on the device.
-- **Small scope** — clipboard history first; no cloud, accounts, AI, scripting, or plugin system in V1.
-- **GNOME-aware, not GNOME-bound** — isolate compositor/session-specific behavior behind small platform backends.
-
-## Planned stack
-
-- **Rust** — application and domain logic
-- **GTK4 / gtk4-rs** — UI and clipboard integration
-- **Libadwaita / libadwaita-rs** — GNOME-native visuals and preferences
-- **GLib / GIO** — application lifecycle and single-instance command handling
-- **SQLite** — local clipboard history persistence
-- **x11rb** — validated X11 positioning and isolated XWayland experiments
-
-The V1 positioning strategy is settled for the primary GNOME/X11 target. The
-Wayland fallback and experimental XWayland path remain isolated so they can
-improve without destabilizing validated X11 behavior.
-
-## Intended V1
-
-- text clipboard history;
-- local persistence;
-- deduplication;
-- `Super+V` launcher integration;
-- popup history UI;
-- instant search;
-- keyboard navigation;
-- pin/delete/clear actions;
-- image and screenshot history;
-- autostart;
-- basic preferences;
-- graceful fallback when pointer-relative positioning is unavailable.
-
-## Non-goals for V1
-
-- cloud sync;
-- accounts;
-- AI features;
-- OCR;
-- scripting;
-- plugin systems;
-- clipboard sharing between machines;
-- keystroke injection as default behavior — Phase 6 added auto-paste as an
-  explicit, off-by-default, X11-only opt-in (see
-  [`SECURITY.md`](SECURITY.md)); LionClip still never synthesizes input
-  unless the user turns that setting on;
-- becoming a general-purpose launcher.
-
-## Architecture
-
-The application is planned as a single resident process with a small number of explicit responsibilities:
-
-```text
-LionClip
-├── Clipboard service
-│   └── observe / read / write clipboard content
-├── History service
-│   └── normalize, deduplicate, persist and query items
-├── Popup UI
-│   └── GTK4 + Libadwaita presentation and interaction
-├── Positioning backend
-│   ├── validated X11 placement
-│   ├── experimental XWayland placement
-│   └── compositor-managed Wayland fallback
-└── Settings / application lifecycle
-    └── GApplication, autostart and preferences
-```
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md) once the repository bootstrap is complete.
-
-## Development
-
-Build dependencies on Ubuntu/Zorin `noble`:
+Dependências nativas em Ubuntu/Zorin Noble:
 
 ```bash
 sudo apt install build-essential libadwaita-1-dev libgtk-4-dev libx11-dev pkg-config
 ```
 
-Rust stable, then:
+Com Rust stable:
 
 ```bash
+git clone https://github.com/Pianisuto/LionClip.git
+cd LionClip
 cargo build
-cargo test
+cargo test --all-features
 cargo run -- show
 ```
 
-`cargo run` with no arguments starts the resident instance without a popup, the
-same as autostart does.
-
-Build the package (needs `dpkg-dev`, and `librsvg2-bin` or
-`gdk-pixbuf-thumbnailer` to rasterize the icon):
-
-```bash
-packaging/deb/build.sh
-```
-
-It writes `target/deb/lionclip_<version>_amd64.deb`, taking the
-shared-library dependencies from `dpkg-shlibdeps` reading the built binary
-and adding the two the maintainer scripts need but no binary reveals:
-`hicolor-icon-theme` for the icon directories and `libglib2.0-bin` for the
-`glib-compile-schemas` that compiles the preferences schema on install.
-Everything the package installs comes from [`packaging/`](packaging): the
-desktop entry, the autostart entry, the AppStream metainfo, the icon source
-and the maintainer scripts.
-
-Before pushing:
+Verificações antes de enviar mudanças:
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
-cargo build --release
+cargo build --release --locked
 ```
 
-## Development workflow
+Empacotamento:
 
-Development is intentionally incremental. Each phase must leave behind something visible and testable on the target desktop before the next phase begins.
+```bash
+packaging/deb/build.sh
+```
 
-Agents and contributors should read [`AGENTS.md`](AGENTS.md) before changing the project. Claude-based agents should also read [`CLAUDE.md`](CLAUDE.md).
+O pacote é gerado em `target/deb/lionclip_<version>_amd64.deb`.
 
-The implementation roadmap and copy-paste prompts for coding agents live in [`docs/CODEX_PROMPTS.md`](docs/CODEX_PROMPTS.md).
+### Publicação de versões
 
-For the completed Phase 0 spike, install the native packages and review the
-recorded platform result as documented in
-[`docs/PHASE0_VALIDATION.md`](docs/PHASE0_VALIDATION.md).
+O workflow [`release.yml`](.github/workflows/release.yml) é disparado por tags `v*`. Ele verifica se a tag corresponde à versão do `Cargo.toml`, roda os checks, gera o `.deb`, cria `SHA256SUMS.txt` e publica tudo na mesma GitHub Release.
 
-## Target environment
+Exemplo para uma nova versão:
 
-Primary validation environment:
+```bash
+# atualize version em Cargo.toml/Cargo.lock antes
+git tag v0.1.0
+git push origin v0.1.0
+```
 
-- Zorin OS based on Ubuntu 24.04 (`noble`)
-- GNOME desktop
-- X11 session
+## Tecnologias
 
-Native Wayland remains a supported fallback environment. XWayland inside a
-Wayland session remains experimental and is not a V1 validation requirement.
+- **Rust** — aplicação e domínio;
+- **GTK4 / gtk4-rs** — interface e clipboard;
+- **Libadwaita** — visual nativo e Preferências;
+- **GLib / GIO** — lifecycle e single-instance;
+- **SQLite / rusqlite** — histórico local;
+- **x11rb** — posicionamento e auto-paste isolados no X11.
 
-Support for other Linux desktops is welcome later, but must not compromise the small and reliable V1 for the primary environment.
+A arquitetura, decisões de plataforma e roadmap ficam em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) e [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## Contributing
+## Licença
 
-The project is very early. Before opening a large implementation PR, please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and keep changes aligned with the current roadmap phase.
-
-## License
-
-A license has not been selected yet. Until a license file is added, the repository being public does **not** grant permission to copy, modify, or redistribute the code beyond what GitHub's Terms of Service require for viewing and forking on the platform.
+Uma licença ainda não foi selecionada. Enquanto não houver um arquivo `LICENSE`, o fato de o repositório ser público não concede permissão para copiar, modificar ou redistribuir o código além do permitido pelos Termos de Serviço do GitHub.
