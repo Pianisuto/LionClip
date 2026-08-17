@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    time::Instant,
 };
 
 use adw::prelude::*;
@@ -11,8 +12,10 @@ use crate::{
     clipboard::{ClipboardService, ClipboardWriter, HistoryChangedCallback},
     history::{HistoryPayload, TextHistory},
     image_cleanup::ImageCleanupCoordinator,
+    paste::{self, PasteCoordinator, PasteTarget},
     popup::{self, HistoryPopup},
     positioning::{PointerAnchor, Positioner, SessionDiagnostics},
+    settings::{PreferencesWindow, SettingsService, build_preferences_window},
     storage::{self, StoragePaths},
     unix_signals,
 };
@@ -106,9 +109,17 @@ struct AppState {
     history: Rc<RefCell<TextHistory>>,
     popup: Rc<HistoryPopup>,
     positioner: Positioner,
+    paste: PasteCoordinator,
+    /// The single preferences window instance. Like the popup, it hides
+    /// rather than closes, so every `lionclip settings` invocation and every
+    /// "Preferences" menu click reuses it instead of building a second one.
+    settings_window: Rc<PreferencesWindow>,
     /// Pointer sample of the placement made before the popup was mapped, so the
     /// placement that runs at map time agrees with it.
     pending_anchor: Rc<Cell<Option<PointerAnchor>>>,
+    /// The auto-paste target captured the moment the popup was shown, before
+    /// its own window had a surface. See `PasteCoordinator::capture_target`.
+    pending_paste_target: Rc<Cell<Option<PasteTarget>>>,
     _clipboard_service: ClipboardService,
     _hold: gio::ApplicationHoldGuard,
 }
@@ -132,9 +143,11 @@ impl AppState {
         let diagnostics = SessionDiagnostics::collect();
         println!("{}", diagnostics.log_line());
 
+        let settings = Rc::new(SettingsService::open());
         let image_cleanup = ImageCleanupCoordinator::new(paths.clone());
         let history = Rc::new(RefCell::new(load_history(
             paths.clone(),
+            settings.history_limit() as usize,
             image_cleanup.clone(),
         )));
         let history_changed: HistoryChangedCallback = Rc::new(RefCell::new(None));
@@ -144,22 +157,89 @@ impl AppState {
             history_changed.clone(),
             paths,
             image_cleanup,
+            settings.clone(),
         );
         let writer: ClipboardWriter = clipboard_service.writer();
 
         let positioner = Positioner::new(&diagnostics);
+        let paste = PasteCoordinator::new(&diagnostics);
+        let pending_paste_target: Rc<Cell<Option<PasteTarget>>> = Rc::new(Cell::new(None));
+
+        // Built before the popup so the popup's "Preferences" menu item can
+        // hold a handle to it; it only ever needs `history_changed`'s shared
+        // callback cell to ask the popup to refresh, not the popup itself, so
+        // construction order between the two does not otherwise matter.
+        let settings_window = Rc::new(build_preferences_window(
+            application,
+            settings.clone(),
+            history.clone(),
+            writer.clone(),
+            paste.is_available(),
+            {
+                let history_changed = history_changed.clone();
+
+                move || {
+                    if let Some(callback) = history_changed.borrow().as_ref() {
+                        callback();
+                    }
+                }
+            },
+        ));
+
+        // The restore closure needs the popup's own window to tell "our popup
+        // is still closing" from "the user moved to another application", but
+        // it is built before the popup exists, so the window is bound right
+        // after `popup::build` returns and read only when an item is chosen.
+        let popup_window: Rc<RefCell<Option<adw::ApplicationWindow>>> = Rc::new(RefCell::new(None));
+
         let popup = Rc::new(popup::build(
             application,
             history.clone(),
+            settings.clone(),
+            writer.clone(),
             {
                 let history = history.clone();
+                let settings = settings.clone();
+                let pending_paste_target = pending_paste_target.clone();
+                let popup_window = popup_window.clone();
 
                 move |id| {
+                    // Measured from the moment the user's choice reaches the
+                    // application, so the diagnostic below covers everything
+                    // LionClip is responsible for — not just the X11 exchange
+                    // the paste backend times on its own.
+                    let activated = Instant::now();
                     let payload = history.borrow().item(id).map(|item| item.payload().clone());
-                    match payload {
-                        Some(HistoryPayload::Text(text)) => writer.restore_text(&text),
-                        Some(HistoryPayload::Image(image)) => writer.restore_image(&image),
-                        None => {}
+                    // The target was captured once, when the popup opened;
+                    // it is not consumed here, because Up/Down navigation and
+                    // other non-activating interactions in between must not
+                    // change what a later activation pastes into.
+                    let target = pending_paste_target.get();
+                    let restored = match payload {
+                        Some(HistoryPayload::Text(text)) => Some(writer.restore_text(&text)),
+                        Some(HistoryPayload::Image(image)) => Some(writer.restore_image(&image)),
+                        None => None,
+                    };
+                    let Some(restore_succeeded) = restored else {
+                        return;
+                    };
+                    // Image restore reads the stored blob synchronously, so
+                    // this is the one part of the path whose cost depends on
+                    // the item rather than on the session.
+                    let restore_ms = activated.elapsed().as_millis();
+
+                    let behavior =
+                        paste::decide(settings.auto_paste(), target.is_some(), restore_succeeded);
+                    if let (paste::SelectionBehavior::RestoreAndPaste, Some(target), Some(window)) =
+                        (behavior, target, popup_window.borrow().as_ref())
+                    {
+                        paste.request_paste(target, window, move |sent| {
+                            println!(
+                                "lionclip: auto-paste result sent={sent} restore_ms={restore_ms} \
+                                 activation_to_keys_ms={}",
+                                activated.elapsed().as_millis()
+                            );
+                        });
                     }
                 }
             },
@@ -168,7 +248,14 @@ impl AppState {
 
                 move |window| positioner.holds_keyboard_focus(window)
             },
+            {
+                let settings_window = settings_window.clone();
+
+                move || settings_window.present()
+            },
         ));
+
+        *popup_window.borrow_mut() = Some(popup.window.clone());
 
         // Revealing happens when the window is mapped, never from a frame
         // clock: a popup that maps without becoming visible gets no frames, and
@@ -183,8 +270,13 @@ impl AppState {
                 // The mapped size is final here, so this placement is the
                 // authoritative one; it reuses the pointer sample of the
                 // placement made before mapping.
+                let started = Instant::now();
                 let outcome = positioner.place(window, pending_anchor.get());
-                println!("{}", outcome.log_line());
+                println!(
+                    "{} map_place_us={}",
+                    outcome.log_line(),
+                    started.elapsed().as_micros()
+                );
                 window.set_opacity(1.0);
             }
         });
@@ -199,11 +291,33 @@ impl AppState {
             }
         }));
 
+        // The resident history, not the preferences window, is what has to
+        // follow the stored limit: a `gsettings`/dconf write from outside
+        // this process changes the persisted value and what Preferences
+        // shows the next time it opens, but nothing else would tell the
+        // running `TextHistory` to shrink. Subscribing to the key itself
+        // covers both origins with one path, and needs no polling because
+        // GSettings already delivers the change.
+        settings.connect_history_limit_changed({
+            let history = history.clone();
+            let history_changed = history_changed.clone();
+
+            move |limit| {
+                history.borrow_mut().set_unpinned_limit(limit as usize);
+                if let Some(callback) = history_changed.borrow().as_ref() {
+                    callback();
+                }
+            }
+        });
+
         Some(Self {
             history,
             popup,
             positioner,
+            paste,
+            settings_window,
             pending_anchor,
+            pending_paste_target,
             _clipboard_service: clipboard_service,
             _hold: application.hold(),
         })
@@ -211,6 +325,10 @@ impl AppState {
 
     /// Applies one command to the popup of the resident instance.
     fn apply(&self, command: Command) {
+        if command == Command::Settings {
+            self.settings_window.present();
+            return;
+        }
         match command.intent(self.popup.window.is_visible()) {
             PopupIntent::Show => self.show_popup(),
             PopupIntent::Hide => self.popup.hide(),
@@ -235,9 +353,23 @@ impl AppState {
             return;
         }
 
+        // Every step below runs on the GTK main thread and several of them
+        // are synchronous X round trips, so each is timed separately: this
+        // is the stretch between the shortcut being pressed and the popup
+        // appearing, and anything slow here is felt directly.
+        let started = Instant::now();
+
+        // Captured first, while the popup is confirmed not visible: the
+        // target is whatever held X input focus right before LionClip
+        // opened, not whatever ends up focused after it closes.
+        self.pending_paste_target.set(self.paste.capture_target());
+        let capture_target = started.elapsed();
+
         // Render the final content first, so both placements below measure the
         // popup the user is about to see.
+        let phase = Instant::now();
         self.popup.prepare();
+        let prepare = phase.elapsed();
 
         // Nothing may be visible before the popup sits at the pointer, and the
         // window keeps the frame it was hidden with, so hide the content and
@@ -245,29 +377,54 @@ impl AppState {
         self.popup.window.set_opacity(0.0);
         // Realizing first gives even the very first open a surface to place
         // before it is mapped.
+        let phase = Instant::now();
         gtk::prelude::WidgetExt::realize(&self.popup.window);
+        let realize = phase.elapsed();
         // Placement runs on its own X connection, so a still-pending unmap from
         // a previous open could otherwise be processed after this move and
         // leave the popup at its old position.
+        let phase = Instant::now();
         if let Some(display) = gdk::Display::default() {
             display.sync();
         }
+        let display_sync = phase.elapsed();
+
+        let phase = Instant::now();
         self.pending_anchor
             .set(self.positioner.place(&self.popup.window, None).anchor());
+        let place = phase.elapsed();
 
+        let phase = Instant::now();
         self.popup.present();
+        let present = phase.elapsed();
+
+        println!(
+            "lionclip: popup open capture_target_us={} prepare_us={} realize_us={} \
+             display_sync_us={} place_us={} present_us={} total_us={}",
+            capture_target.as_micros(),
+            prepare.as_micros(),
+            realize.as_micros(),
+            display_sync.as_micros(),
+            place.as_micros(),
+            present.as_micros(),
+            started.elapsed().as_micros()
+        );
     }
 }
 
-fn load_history(paths: StoragePaths, image_cleanup: ImageCleanupCoordinator) -> TextHistory {
-    match TextHistory::persistent_with_cleanup(paths, image_cleanup.clone()) {
+fn load_history(
+    paths: StoragePaths,
+    unpinned_limit: usize,
+    image_cleanup: ImageCleanupCoordinator,
+) -> TextHistory {
+    match TextHistory::persistent_with_cleanup(paths, unpinned_limit, image_cleanup.clone()) {
         Ok(history) => history,
         Err(error) => {
             eprintln!(
                 "lionclip: persistence disabled stage={}",
                 error.diagnostic()
             );
-            TextHistory::in_memory_with_cleanup(image_cleanup)
+            TextHistory::in_memory_with_cleanup(unpinned_limit, image_cleanup)
         }
     }
 }

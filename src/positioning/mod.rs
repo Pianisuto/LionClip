@@ -55,6 +55,16 @@ impl SessionDiagnostics {
         }
     }
 
+    /// Whether auto-paste may use the X11 input-synthesis backend. This is
+    /// deliberately stricter than "GDK is using X11": an X11 GDK backend
+    /// inside a Wayland session is XWayland, where the X server cannot safely
+    /// represent focus across native Wayland applications. Auto-paste is
+    /// therefore native-X11-session only until another backend is explicitly
+    /// designed and validated.
+    pub fn supports_auto_paste(&self) -> bool {
+        self.backend == DisplayBackend::X11 && self.session_type.eq_ignore_ascii_case("x11")
+    }
+
     fn x11_status(&self) -> X11PathStatus {
         if self.session_type.eq_ignore_ascii_case("x11") {
             X11PathStatus::Working
@@ -233,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn native_x11_is_reported_as_working() {
+    fn native_x11_is_reported_as_working_and_supports_auto_paste() {
         let diagnostics = SessionDiagnostics {
             session_type: "x11".into(),
             backend: DisplayBackend::X11,
@@ -241,10 +251,11 @@ mod tests {
         };
 
         assert_eq!(diagnostics.x11_status(), X11PathStatus::Working);
+        assert!(diagnostics.supports_auto_paste());
     }
 
     #[test]
-    fn xwayland_is_reported_as_experimental() {
+    fn xwayland_is_experimental_and_does_not_support_auto_paste() {
         let diagnostics = SessionDiagnostics {
             session_type: "wayland".into(),
             backend: DisplayBackend::X11,
@@ -252,6 +263,18 @@ mod tests {
         };
 
         assert_eq!(diagnostics.x11_status(), X11PathStatus::Experimental);
+        assert!(!diagnostics.supports_auto_paste());
+    }
+
+    #[test]
+    fn native_wayland_does_not_support_auto_paste() {
+        let diagnostics = SessionDiagnostics {
+            session_type: "wayland".into(),
+            backend: DisplayBackend::Wayland,
+            display_type: "GdkWaylandDisplay".into(),
+        };
+
+        assert!(!diagnostics.supports_auto_paste());
     }
 
     #[test]

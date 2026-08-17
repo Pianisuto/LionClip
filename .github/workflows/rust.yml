@@ -24,9 +24,11 @@ jobs:
           sudo apt-get install --yes \
             build-essential \
             libadwaita-1-dev \
+            libglib2.0-bin \
             libgtk-4-dev \
             libx11-dev \
-            pkg-config
+            pkg-config \
+            xvfb
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -62,6 +64,7 @@ jobs:
             desktop-file-utils \
             dpkg-dev \
             libadwaita-1-dev \
+            libglib2.0-bin \
             libgtk-4-dev \
             libx11-dev \
             librsvg2-bin \
@@ -87,6 +90,14 @@ jobs:
           desktop-file-validate packaging/autostart/io.github.Pianisuto.LionClip.desktop
           appstreamcli validate --no-net \
             packaging/metainfo/io.github.Pianisuto.LionClip.metainfo.xml
+
+      - name: Validate the GSettings schema
+        run: |
+          set -eu
+          work=$(mktemp -d)
+          cp packaging/schemas/io.github.Pianisuto.LionClip.gschema.xml "$work/"
+          glib-compile-schemas --strict "$work"
+          rm -rf "$work"
 
       - name: Smoke test the command line without a display
         run: |
@@ -116,6 +127,7 @@ jobs:
             ./etc/xdg/autostart/io.github.Pianisuto.LionClip.desktop \
             ./usr/share/metainfo/io.github.Pianisuto.LionClip.metainfo.xml \
             ./usr/share/icons/hicolor/scalable/apps/io.github.Pianisuto.LionClip.svg \
+            ./usr/share/glib-2.0/schemas/io.github.Pianisuto.LionClip.gschema.xml \
             ./usr/share/doc/lionclip/copyright \
             ./usr/share/doc/lionclip/changelog.Debian.gz
           do
@@ -133,9 +145,24 @@ jobs:
             }
           done
 
+          # gschemas.compiled is the merge of every schema on the system;
+          # packaging our own would clobber every other app's compiled
+          # schemas, so postinst/postrm compile it in place instead.
+          case "$contents" in
+            *gschemas.compiled*)
+              echo "a compiled gschemas.compiled must not ship in the package" >&2
+              exit 1
+              ;;
+          esac
+
           depends=$(dpkg-deb --field "$package" Depends)
           echo "Depends: $depends"
-          for runtime in libgtk-4-1 libadwaita-1-0 libgdk-pixbuf-2.0-0; do
+          # libgtk-4-1/libadwaita-1-0/libgdk-pixbuf-2.0-0 come from
+          # dpkg-shlibdeps. libglib2.0-bin does not: it provides the
+          # glib-compile-schemas that postinst/postrm run, which no amount
+          # of inspecting the binary can reveal, so it has to stay declared
+          # by hand in packaging/deb/build.sh.
+          for runtime in libgtk-4-1 libadwaita-1-0 libgdk-pixbuf-2.0-0 libglib2.0-bin; do
             case "$depends" in
               *"$runtime"*) ;;
               *) echo "missing runtime dependency: $runtime" >&2; exit 1 ;;

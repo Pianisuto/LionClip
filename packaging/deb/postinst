@@ -1,8 +1,9 @@
 #!/bin/sh
-# Refreshes the two desktop caches that decide whether the launcher entry and
-# the icon show up. It deliberately does not start, stop or restart LionClip:
-# a running instance keeps the executable it was started from until the user
-# logs out or restarts it, which /usr/share/doc/lionclip/README.Debian explains.
+# Refreshes the caches that decide whether the launcher entry, the icon and
+# the preferences schema show up. It deliberately does not start, stop or
+# restart LionClip: a running instance keeps the executable it was started
+# from until the user logs out or restarts it, which
+# /usr/share/doc/lionclip/README.Debian explains.
 set -e
 
 if [ "$1" = "configure" ]; then
@@ -11,6 +12,12 @@ if [ "$1" = "configure" ]; then
     fi
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database -q /usr/share/applications || true
+    fi
+    if command -v glib-compile-schemas >/dev/null 2>&1; then
+        # gschemas.compiled is the merge of every schema on the system, so
+        # this recompiles the whole directory rather than writing anything
+        # of our own into it.
+        glib-compile-schemas /usr/share/glib-2.0/schemas || true
     fi
 fi
 
