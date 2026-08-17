@@ -35,9 +35,11 @@ everything that needs a real desktop. Read `AGENTS.md` and
   torn down per test, own display number, no shared state): capturing the
   window that holds input focus; rejecting `PointerRoot`/`None` focus as "no
   target"; a destroyed target is rejected and nothing is synthesized; the
-  full sequence (SetInputFocus reinforcement → real `FocusIn` confirmation →
-  XTEST Ctrl+V) hands focus back to the target and delivers both key events
-  only to that window, never to a decoy that had focus in between
+  full sequence (SetInputFocus reinforcement → focus confirmation → XTEST
+  Ctrl+V) hands focus back to the target and delivers both key events only
+  to that window, never to a decoy that had focus in between; and a target
+  that *already* holds focus is confirmed immediately rather than waiting
+  out the timeout for a `FocusIn` event the server will never send
   (`src/paste/x11.rs::xvfb_tests`). There is no window manager under Xvfb, so
   the `_NET_ACTIVE_WINDOW` half of activation is exercised only on the real
   target machine (see below); the direct `SetInputFocus` path is what these
@@ -163,6 +165,8 @@ Run on the target Zorin GNOME/X11 machine, from the installed package
 - The 512 MiB aggregate image storage cap remains a fixed safety limit, not
   a user-facing setting, for the same reason Phase 4 did not expose it: it
   is a technical backstop, not a preference someone tunes day to day.
-- Focus confirmation is a bounded ~400 ms wait for a real `FocusIn` event,
-  not a blocking wait forever; a window manager that takes longer than that
-  to switch focus will fail safe (restore only, no paste) rather than hang.
+- Focus confirmation is a bounded ~400 ms wait for real server state — the
+  target already owning the focus, or a `FocusIn` event saying it just
+  gained it — not a blocking wait forever; a window manager that takes
+  longer than that to switch focus will fail safe (restore only, no paste)
+  rather than hang.

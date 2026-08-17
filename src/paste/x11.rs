@@ -186,7 +186,7 @@ fn attempt_paste_on(display: Option<&str>, target: PasteTarget) -> bool {
         return false;
     }
 
-    if !wait_for_focus_confirmation(&connection, target.xid) {
+    if !wait_for_focus_confirmation(&connection, root, target.xid) {
         eprintln!("lionclip: auto-paste skipped stage=focus-not-confirmed");
         return false;
     }
@@ -243,9 +243,22 @@ fn request_activation<C: Connection>(connection: &C, root: u32, target: u32) -> 
     activation_sent || focus_set
 }
 
-fn wait_for_focus_confirmation<C: Connection>(connection: &C, target: u32) -> bool {
+/// Confirms the target actually owns the keyboard focus before any key is
+/// synthesized, by either of two pieces of real server state: it already
+/// holds the focus, or a `FocusIn` event says it just gained it.
+///
+/// Both are needed. Hiding the popup unmaps it, which makes the window
+/// manager hand focus back to the previously focused window — the target —
+/// on its own. When that lands before this runs, the activation request
+/// changes nothing and the server generates no `FocusIn` at all, so waiting
+/// only for the event would time out and skip a paste whose target is
+/// already exactly where it needs to be.
+fn wait_for_focus_confirmation<C: Connection>(connection: &C, root: u32, target: u32) -> bool {
     let deadline = Instant::now() + FOCUS_CONFIRMATION_TIMEOUT;
     loop {
+        if holds_focus(connection, root, target) {
+            return true;
+        }
         loop {
             match connection.poll_for_event() {
                 Ok(Some(Event::FocusIn(event))) if event.event == target => return true,
@@ -259,6 +272,28 @@ fn wait_for_focus_confirmation<C: Connection>(connection: &C, target: u32) -> bo
         }
         thread::sleep(FOCUS_POLL_INTERVAL);
     }
+}
+
+/// Whether the keyboard focus currently sits on `target` or on one of its
+/// descendants — an application's focus normally lives on a child window of
+/// the top-level, so an exact match alone would miss the common case.
+fn holds_focus<C: Connection>(connection: &C, root: u32, target: u32) -> bool {
+    let Some(focus) = connection
+        .get_input_focus()
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.focus)
+    else {
+        return false;
+    };
+    if focus == target {
+        return true;
+    }
+    // `None`/`PointerRoot` and the root window itself are never the target.
+    if focus == 0 || focus == 1 || focus == root {
+        return false;
+    }
+    toplevel_under_root(connection, root, focus) == Some(target)
 }
 
 /// Presses and releases Control then V. Every step after a successful press
@@ -467,6 +502,63 @@ mod xvfb_tests {
         assert_eq!(
             capture_target_for_test(&xvfb.display),
             Err(PasteError::NoTarget)
+        );
+    }
+
+    /// The popup unmapping on hide makes the window manager hand focus back
+    /// to the target on its own. When that lands before the paste attempt
+    /// starts, the target is *already* focused and the activation request
+    /// changes nothing, so no `FocusIn` event is ever generated. Waiting for
+    /// one would time out and skip the paste even though the target is
+    /// exactly where it needs to be.
+    #[test]
+    fn a_target_that_already_holds_focus_is_confirmed_without_a_focus_event() {
+        let Some(xvfb) = XvfbGuard::spawn() else {
+            eprintln!("skipping: Xvfb not available");
+            return;
+        };
+        let (connection, _) = x11rb::connect(Some(&xvfb.display)).unwrap();
+        let root = root_of(&connection);
+        let window = create_test_window(&connection, root);
+
+        connection
+            .set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        let target =
+            capture_target_for_test(&xvfb.display).expect("target window should be captured");
+        assert_eq!(target.xid, window);
+        connection.sync().unwrap();
+
+        // No focus change happens between here and the paste attempt.
+        let started = Instant::now();
+        assert!(attempt_paste_for_test(&xvfb.display, target));
+        assert!(
+            started.elapsed() < FOCUS_CONFIRMATION_TIMEOUT,
+            "an already-focused target must be confirmed immediately, not after the timeout"
+        );
+
+        let control = keycode_for_keysym(&connection, XK_CONTROL_L).unwrap();
+        let v = keycode_for_keysym(&connection, XK_LOWERCASE_V).unwrap();
+        let mut received_control = false;
+        let mut received_v = false;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !(received_control && received_v) && Instant::now() < deadline {
+            match connection.poll_for_event() {
+                Ok(Some(Event::KeyPress(event))) => {
+                    assert_eq!(event.event, window);
+                    received_control |= event.detail == control;
+                    received_v |= event.detail == v;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => thread::sleep(Duration::from_millis(5)),
+                Err(_) => break,
+            }
+        }
+        assert!(
+            received_control && received_v,
+            "expected both keys to be observed on the target"
         );
     }
 

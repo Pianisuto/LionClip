@@ -603,11 +603,18 @@ Every step either confirms real state or gives up; nothing assumes success:
    only ever asked to hand focus back to a window LionClip itself observed
    holding it moments earlier — the specific case focus-stealing prevention
    exists to allow, not the case it exists to block;
-3. key synthesis only runs after a real `FocusIn` event confirms the target
-   actually regained focus, polled non-blocking with a short pause between
-   attempts and a bounded ~400 ms deadline — the event is the confirmation,
-   the pause is only how often the server is asked, and a timeout fails safe
-   rather than guessing;
+3. key synthesis only runs once real server state confirms the target owns
+   the keyboard focus — either a `GetInputFocus` query already reporting it
+   (or one of its descendants, since an application's focus normally sits on
+   a child of the top-level), or a `FocusIn` event saying it just gained it.
+   Both checks are needed: hiding the popup unmaps it, which makes the
+   window manager hand focus back to the target on its own, and when that
+   lands first the activation request changes nothing and no `FocusIn` is
+   ever generated. Waiting only for the event would then time out and skip a
+   paste whose target is already exactly where it needs to be. The pair is
+   polled non-blocking with a short pause between attempts and a bounded
+   ~400 ms deadline; the pause is only how often the server is asked, and a
+   timeout fails safe rather than guessing;
 4. Control and V key presses are synthesized through XTEST, with every
    already-pressed key unconditionally released even if a later step fails,
    so a partial failure can never leave a modifier logically stuck at the X
