@@ -44,3 +44,110 @@ jobs:
 
       - name: Build
         run: cargo build --all-features
+
+  package:
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install native and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            appstream \
+            build-essential \
+            desktop-file-utils \
+            dpkg-dev \
+            libadwaita-1-dev \
+            libgtk-4-dev \
+            libx11-dev \
+            librsvg2-bin \
+            pkg-config
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Check packaging scripts parse
+        run: |
+          bash -n packaging/deb/build.sh
+          bash -n packaging/icons/render.sh
+          bash -n packaging/scripts/lionclip-shortcut
+          sh -n packaging/deb/postinst
+          sh -n packaging/deb/postrm
+
+      - name: Validate desktop metadata
+        run: |
+          desktop-file-validate packaging/desktop/io.github.Pianisuto.LionClip.desktop
+          desktop-file-validate packaging/autostart/io.github.Pianisuto.LionClip.desktop
+          appstreamcli validate --no-net \
+            packaging/metainfo/io.github.Pianisuto.LionClip.metainfo.xml
+
+      - name: Smoke test the command line without a display
+        run: |
+          set -eu
+          binary=target/release/lionclip
+          env -u DISPLAY -u WAYLAND_DISPLAY "$binary" --help | grep -q 'lionclip toggle'
+          env -u DISPLAY -u WAYLAND_DISPLAY "$binary" --version | grep -q '^lionclip '
+          status=0
+          env -u DISPLAY -u WAYLAND_DISPLAY "$binary" not-a-command >/dev/null 2>&1 || status=$?
+          test "$status" -eq 2
+
+      - name: Build the Debian package
+        run: SKIP_BUILD=1 packaging/deb/build.sh
+
+      - name: Inspect the Debian package
+        run: |
+          set -eu
+          package=$(echo target/deb/lionclip_*_amd64.deb)
+          dpkg-deb --info "$package"
+          dpkg-deb --contents "$package"
+
+          contents=$(dpkg-deb --contents "$package")
+          for path in \
+            ./usr/bin/lionclip \
+            ./usr/bin/lionclip-shortcut \
+            ./usr/share/applications/io.github.Pianisuto.LionClip.desktop \
+            ./etc/xdg/autostart/io.github.Pianisuto.LionClip.desktop \
+            ./usr/share/metainfo/io.github.Pianisuto.LionClip.metainfo.xml \
+            ./usr/share/icons/hicolor/scalable/apps/io.github.Pianisuto.LionClip.svg \
+            ./usr/share/doc/lionclip/copyright \
+            ./usr/share/doc/lionclip/changelog.Debian.gz
+          do
+            echo "$contents" | grep -q " $path\$" || {
+              echo "missing from the package: $path" >&2
+              exit 1
+            }
+          done
+
+          for size in 16 24 32 48 64 128 256; do
+            icon="./usr/share/icons/hicolor/${size}x${size}/apps/io.github.Pianisuto.LionClip.png"
+            echo "$contents" | grep -q " $icon\$" || {
+              echo "missing icon size: $icon" >&2
+              exit 1
+            }
+          done
+
+          depends=$(dpkg-deb --field "$package" Depends)
+          echo "Depends: $depends"
+          for runtime in libgtk-4-1 libadwaita-1-0 libgdk-pixbuf-2.0-0; do
+            case "$depends" in
+              *"$runtime"*) ;;
+              *) echo "missing runtime dependency: $runtime" >&2; exit 1 ;;
+            esac
+          done
+          case "$depends" in
+            *-dev*) echo "build dependency leaked into Depends" >&2; exit 1 ;;
+          esac
+
+      - name: Upload the Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lionclip-deb
+          path: target/deb/*.deb
+          if-no-files-found: error

@@ -79,22 +79,80 @@ Do not create all of these files before their responsibilities exist. The tree i
 
 ## Application lifecycle
 
-Use GApplication/AdwApplication semantics for a single logical app instance.
+### Application ID
 
-Planned commands:
+The final application ID is `io.github.Pianisuto.LionClip`. It is the D-Bus
+name GIO uses for single-instance behavior, and the base name of every
+installed desktop-integration file:
 
 ```text
-lionclip
-lionclip show
-lionclip hide
-lionclip toggle
-lionclip settings
-lionclip clear
+/usr/share/applications/io.github.Pianisuto.LionClip.desktop
+/etc/xdg/autostart/io.github.Pianisuto.LionClip.desktop
+/usr/share/metainfo/io.github.Pianisuto.LionClip.metainfo.xml
+/usr/share/icons/hicolor/*/apps/io.github.Pianisuto.LionClip.{svg,png}
 ```
 
-Only add commands when the corresponding behavior exists.
+It follows the GNOME reverse-DNS convention for a project hosted at
+`github.com/Pianisuto/LionClip` and keeps the GitHub account and repository
+spelling, so the ID reads as the project it belongs to. AppStream flags the
+capital letters as a pedantic note, not an error, and GNOME applications
+commonly carry them. A unit test asserts that the constant in `cli.rs` and the
+packaged files still agree, because a divergence here breaks activation,
+the launcher icon and single-instance behavior at once, and only on an
+installed system.
 
-A second CLI invocation should communicate with the existing application instance rather than create a second long-lived clipboard monitor.
+### Commands
+
+```text
+lionclip          start the resident instance, leave the popup alone
+lionclip show     show the popup
+lionclip hide     hide the popup, keep the process resident
+lionclip toggle   show the popup when hidden, hide it when visible
+lionclip --help | --version
+```
+
+`cli::parse` is pure: it turns arguments into a `Command` or into an `Answer`
+the invoked process prints itself. `--help`, `--version` and invalid arguments
+are answered before any application object exists, so they never open a
+display, never register on the bus and never start a monitor. Invalid arguments
+print one line plus the usage line and exit with status 2.
+
+### Command routing and single instance
+
+The application runs with `HANDLES_COMMAND_LINE`. The first process to own the
+application ID becomes the resident instance and builds the whole application
+state — history, clipboard monitor, popup — once, in `startup`. Every later
+invocation finds the name taken, hands its argument vector to that instance
+over D-Bus and exits with the code the instance returns. Repeated `Super+V`
+presses are therefore commands to one process, and there is only ever one
+clipboard monitor.
+
+`activate` is deliberately left unconnected. The command line is the only entry
+point, which is what guarantees the autostart invocation cannot open the popup
+at login.
+
+The resident instance stays alive on an `ApplicationHoldGuard` taken when the
+state is built. An instance that fails to build state takes no guard, so it
+exits instead of lingering as a broken primary that later invocations would
+reach.
+
+### Toggle
+
+`Command::intent(popup_visible)` is the single decision point, and it is a pure
+function with tests:
+
+```text
+Run    -> Leave
+Show   -> Show
+Hide   -> Hide
+Toggle -> Hide when the popup is visible, Show when it is not
+```
+
+A visible popup is hidden, never hidden and shown again: the show path places
+the window before the compositor maps it, so re-running it on a window that is
+already on screen would move a popup the user is looking at. `Show` on an
+already visible popup only returns the focus to the search field, for the same
+reason.
 
 ## Clipboard service
 
@@ -446,16 +504,112 @@ Logs must not include:
 - image bytes;
 - secrets inferred from clipboard content.
 
-## Packaging
+## Desktop integration
 
-Packaging comes after core behavior is validated.
+Everything installed on a user's system lives in `packaging/` and is plain,
+reviewable data or shell.
 
-Expected Linux integration includes:
+### Desktop entry
 
-- `.desktop` entry;
-- app icon and metadata;
-- XDG autostart integration where appropriate;
-- documented GNOME/Zorin shortcut setup for `Super+V`;
-- a reproducible `.deb` path for Ubuntu/Zorin users.
+The launcher entry runs `lionclip show`, because clicking an app in the app grid
+should show the app. It carries `Terminal=false`, `StartupNotify=false` and
+`StartupWMClass=lionclip`.
+
+`StartupNotify` is off on purpose: when LionClip is already running, the
+launcher invocation is a remote command that exits immediately, and a startup
+notification would leave the shell showing a "starting" cursor until it timed
+out. `StartupWMClass` matches the `WM_CLASS` GTK sets from the program name,
+verified with `xwininfo` on the target session, so the popup is attributed to
+LionClip in Alt+Tab rather than to an unknown window.
+
+### Autostart
+
+A system-wide XDG autostart entry in `/etc/xdg/autostart` runs `lionclip`,
+which starts the resident instance and its monitor and shows nothing. That is
+the whole point of the bare command existing as its own case: login must start
+recording without putting a window on the screen.
+
+XDG autostart was chosen over a systemd user unit because the resident process
+is a session-scoped GUI client that needs the session's display and D-Bus, which
+is exactly what XDG autostart provides, and because GNOME's own tooling
+(Tweaks, and a per-user copy of the file) already knows how to switch it off.
+
+The file lives under `/etc`, so it is a dpkg conffile: switching autostart off by
+editing it survives upgrades, and purge removes it.
+
+### Super+V
+
+`lionclip-shortcut` writes a GNOME custom keybinding for `lionclip toggle`. It
+is idempotent, reports what it changes, and refuses to act on two conflicts: a
+custom `Super+V` shortcut belonging to another program (it stops and points at
+Settings), and GNOME's own `toggle-message-tray` default (it stops unless
+`--take-over` is passed). A shortcut that already runs *some* `lionclip` binary
+— a development build, say — is recognized as LionClip's own and updated in
+place rather than duplicated.
+
+No GNOME Shell extension is involved.
+
+### Packaging layout
+
+`packaging/deb/build.sh` assembles a staging tree and calls `dpkg-deb`. There is
+no packaging framework: the control file, the two maintainer scripts and the
+file list are all visible in one place.
+
+```text
+/usr/bin/lionclip
+/usr/bin/lionclip-shortcut
+/usr/share/applications/<app-id>.desktop
+/etc/xdg/autostart/<app-id>.desktop          (conffile)
+/usr/share/icons/hicolor/scalable/apps/<app-id>.svg
+/usr/share/icons/hicolor/{16,24,32,48,64,128,256}x*/apps/<app-id>.png
+/usr/share/metainfo/<app-id>.metainfo.xml
+/usr/share/doc/lionclip/{copyright,README.Debian,changelog.Debian.gz}
+```
+
+Runtime dependencies are not written by hand. `dpkg-shlibdeps` reads the built
+binary and produces the versioned list — GTK4, Libadwaita, GLib, GDK-Pixbuf,
+Pango, libc, libgcc — so they cannot drift from what LionClip actually links
+against, and no `-dev` package can leak in. SQLite is statically bundled by
+`rusqlite` and correctly produces no dependency; `x11rb` speaks the X11 protocol
+in Rust and links no X client library, so X11 comes in through GTK. Only
+`hicolor-icon-theme` is added by hand, because the package installs into that
+theme's directories.
+
+The maintainer scripts do two things: refresh the icon cache and the desktop
+database. They never start, stop or restart LionClip, and they never touch user
+data. A running instance keeps the executable it started from until the user
+logs out or restarts it, which `README.Debian` says plainly; killing a user's
+running process from a package script would lose whatever the monitor had not
+yet written.
+
+Clipboard history is user data. `remove` and `purge` both leave
+`$XDG_DATA_HOME/lionclip` alone: it can belong to several users on one machine,
+and only its owner should decide to delete it.
 
 Flatpak may be evaluated later, but sandbox/clipboard/global-shortcut constraints must be understood before making it the primary package.
+
+### Icon
+
+The source of truth is `packaging/icons/<app-id>.svg`, and the PNGs in the
+package are rendered from it at build time by `packaging/icons/render.sh`
+(`rsvg-convert`, falling back to `gdk-pixbuf-thumbnailer`). The SVG is installed
+as the scalable icon; the fixed sizes exist so 16 and 24 px stay crisp in the
+dock and Alt+Tab, and so the icon still appears where no SVG pixbuf loader is
+installed.
+
+![The LionClip icon at 256 px, and at 16 to 128 px on light and dark backgrounds](images/lionclip-icon-preview.png)
+
+The drawing is LionClip's own. It follows the visual language of the sibling
+Lion\* projects in the same workspace — a frontal, symmetrical lion head with a
+radiating mane, a light face, and a warm gradient — and settles between the two
+of them: the rounded dark tile and two-ring mane construction of LionPocket,
+the orange-to-red mane of LionFlow. What makes it LionClip rather than a recolor
+is the clipboard reading: the face is a squircle board instead of a circle, and
+a small metal clip sits on its top edge where a lion's forehead tuft would be.
+The mane is two offset rings, which is both the family's construction and the
+layered-history cue.
+
+Every element is a large flat shape, because the icon was checked at 16, 24, 32,
+48, 64, 128 and 256 px; earlier drafts that put a separate clipboard object next
+to the head, or a metal clip floating at the top of the tile, were dropped for
+turning into noise below 32 px.

@@ -8,28 +8,151 @@ LionClip is being built around one simple interaction:
 
 The project intentionally avoids becoming a large automation or scripting platform. The goal is to provide the clipboard-history experience that should feel native to the desktop: fast, predictable, keyboard-friendly, and visually consistent with GNOME.
 
+## Install
+
+LionClip ships as a `.deb` for Ubuntu 24.04 and Zorin OS based on `noble`,
+`amd64`. You do not need Rust or Cargo to install it.
+
+Download `lionclip_<version>_amd64.deb`, or build it yourself (see
+[Development](#development)), then:
+
+```bash
+sudo apt install ./lionclip_0.1.0_amd64.deb
+```
+
+`apt` pulls in the GTK4, Libadwaita and GDK-Pixbuf libraries LionClip needs.
+The package installs:
+
+| Path | What it is |
+| --- | --- |
+| `/usr/bin/lionclip` | the application |
+| `/usr/bin/lionclip-shortcut` | the `Super+V` setup helper |
+| `/usr/share/applications/io.github.Pianisuto.LionClip.desktop` | app launcher entry |
+| `/etc/xdg/autostart/io.github.Pianisuto.LionClip.desktop` | starts LionClip at login |
+| `/usr/share/icons/hicolor/*/apps/io.github.Pianisuto.LionClip.{svg,png}` | icon |
+| `/usr/share/metainfo/io.github.Pianisuto.LionClip.metainfo.xml` | AppStream metadata |
+| `/usr/share/doc/lionclip/` | `README.Debian`, changelog, copyright |
+
+## First setup
+
+**Autostart** is already configured: the installed autostart entry runs
+`lionclip` at each login, which starts the resident instance and its clipboard
+monitor *without* opening the popup. Log out and back in once after installing,
+or start it now with:
+
+```bash
+setsid lionclip >/dev/null 2>&1 &
+```
+
+**`Super+V`** is not bound automatically. The helper does it, and refuses to
+take a shortcut away from anything without being asked:
+
+```bash
+lionclip-shortcut install
+```
+
+If GNOME still uses `Super+V` for its notification list, the helper says so and
+stops. Re-run it as `lionclip-shortcut install --take-over` to hand the key
+over, or bind LionClip to another key yourself in
+*Settings → Keyboard → Keyboard Shortcuts → Custom Shortcuts* with the command
+`lionclip toggle`.
+
+Check or undo it any time:
+
+```bash
+lionclip-shortcut status
+lionclip-shortcut remove
+```
+
+## Usage
+
+Press `Super+V`. The popup opens near the pointer with the newest item
+selected; press `Super+V` again to close it.
+
+- **search** — just type; the list filters as you type
+- **navigate** — `Up`/`Down`, or the mouse
+- **restore** — `Enter` or click, then paste normally with `Ctrl+V`
+- **dismiss** — `Escape` (clears a non-empty search first), or click away
+- **pin** — `Ctrl+P`, or the pin button on the row; pinned items stay on top and
+  are never dropped by the history limit
+- **delete** — `Delete` while a row has focus
+- **clear** — the overflow menu next to the search field clears unpinned items
+- **images** — screenshots and copied PNG/JPEG images appear as thumbnails and
+  are restored as the original image
+
+From a terminal or a script:
+
+```bash
+lionclip           # start the resident instance, no popup
+lionclip show      # show the popup
+lionclip hide      # hide the popup, keep running
+lionclip toggle    # show it when hidden, hide it when visible
+```
+
+Every invocation talks to the one resident instance, so there is never a second
+clipboard monitor.
+
+## Upgrade
+
+```bash
+sudo apt install ./lionclip_<newer-version>_amd64.deb
+```
+
+Installing over an existing version replaces the files on disk but does not
+restart a LionClip that is already running — the running process keeps the code
+it started with. Log out and back in, or restart it explicitly:
+
+```bash
+pkill -x lionclip && setsid lionclip >/dev/null 2>&1 &
+```
+
+Reinstalling the same version works the same way.
+
+## Uninstall
+
+```bash
+sudo apt remove lionclip     # remove the program
+sudo apt purge lionclip      # also remove the autostart entry from /etc
+```
+
+Neither touches your clipboard history.
+
+## Remove personal data
+
+Your history lives in `$XDG_DATA_HOME/lionclip`, normally
+`~/.local/share/lionclip`: the SQLite database and the stored images. Package
+removal deliberately leaves it alone. Delete it yourself when you want it gone:
+
+```bash
+rm -rf ~/.local/share/lionclip
+```
+
 ## Status
 
-**Early development / Phase 3 implemented.**
+**Early development / Phase 5 implemented.**
 
 Phase 0 validated pointer-relative popup placement on the real target machine:
 Zorin OS with GNOME/X11. Native GNOME Wayland uses a safe compositor-managed
 fallback because exact top-level placement is unavailable through the current
 approach. XWayland inside a Wayland session remains experimental and has not
-yet been validated. Text clipboard history is event-driven, exact-content
-deduplicated, bounded, and persisted locally in SQLite across restarts.
+yet been validated. Text and image clipboard history is event-driven,
+exact-content deduplicated, bounded, and persisted locally in SQLite across
+restarts.
 
-The popup now behaves like a small system surface: type to search instantly,
-arrows to navigate, `Enter` to restore, `Escape` to clear the search and then
-dismiss, `Delete` to remove an item, `Ctrl+P` to pin, and a restrained overflow
-menu to clear unpinned history. Pinned items are kept first and are exempt from
-the retention limit.
+The popup behaves like a small system surface: type to search instantly, arrows
+to navigate, `Enter` to restore, `Escape` to clear the search and then dismiss,
+`Delete` to remove an item, `Ctrl+P` to pin, and a restrained overflow menu to
+clear unpinned history. Pinned items are kept first and are exempt from the
+retention limit.
 
-Do not expect a usable release yet.
+There are no preferences yet: history limits, retention and a pause control are
+Phase 6.
 
 See [`docs/PHASE0_VALIDATION.md`](docs/PHASE0_VALIDATION.md) for native build
 dependencies, the recorded Phase 0 result, positioning diagnostics, and the
-optional Wayland/XWayland test matrix.
+optional Wayland/XWayland test matrix, and
+[`docs/PHASE5_VALIDATION.md`](docs/PHASE5_VALIDATION.md) for the desktop
+integration and packaging test script.
 
 ## Product principles
 
@@ -102,6 +225,47 @@ LionClip
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md) once the repository bootstrap is complete.
+
+## Development
+
+Build dependencies on Ubuntu/Zorin `noble`:
+
+```bash
+sudo apt install build-essential libadwaita-1-dev libgtk-4-dev libx11-dev pkg-config
+```
+
+Rust stable, then:
+
+```bash
+cargo build
+cargo test
+cargo run -- show
+```
+
+`cargo run` with no arguments starts the resident instance without a popup, the
+same as autostart does.
+
+Build the package (needs `dpkg-dev`, and `librsvg2-bin` or
+`gdk-pixbuf-thumbnailer` to rasterize the icon):
+
+```bash
+packaging/deb/build.sh
+```
+
+It writes `target/deb/lionclip_<version>_amd64.deb`, taking the runtime
+dependencies from `dpkg-shlibdeps` reading the built binary. Everything the
+package installs comes from [`packaging/`](packaging): the desktop entry, the
+autostart entry, the AppStream metainfo, the icon source and the maintainer
+scripts.
+
+Before pushing:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+cargo build --release
+```
 
 ## Development workflow
 
