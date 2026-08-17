@@ -27,6 +27,7 @@ use x11rb::{
         },
         xtest,
     },
+    wrapper::ConnectionExt as _,
 };
 
 /// Sent to the previously focused window when the user picks a history item.
@@ -41,7 +42,13 @@ const FOCUS_CONFIRMATION_TIMEOUT: Duration = Duration::from_millis(400);
 /// confirmation. `poll_for_event` never blocks, so without a pause the wait
 /// loop would busy-spin a thread-pool thread; the pause only paces how often
 /// the server is asked, it is not itself what confirms anything landed.
-const FOCUS_POLL_INTERVAL: Duration = Duration::from_millis(5);
+///
+/// It is also the granularity at which focus landing is noticed, and that
+/// delay lands directly on what the user perceives between choosing an item
+/// and seeing it pasted, so it is kept short. The cost is bounded: at worst
+/// one cheap round trip per interval, for at most
+/// [`FOCUS_CONFIRMATION_TIMEOUT`], on a background thread.
+const FOCUS_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PasteTarget {
@@ -151,6 +158,7 @@ pub(super) fn attempt_paste_for_test(display: &str, target: PasteTarget) -> bool
 }
 
 fn attempt_paste_on(display: Option<&str>, target: PasteTarget) -> bool {
+    let started = Instant::now();
     let Ok((connection, screen_number)) = x11rb::connect(display) else {
         eprintln!("lionclip: auto-paste failed stage=connection");
         return false;
@@ -186,17 +194,38 @@ fn attempt_paste_on(display: Option<&str>, target: PasteTarget) -> bool {
         return false;
     }
 
+    // Resolved before the focus wait rather than after it. It depends on
+    // nothing the wait establishes, and the keyboard-mapping reply it needs
+    // is the largest exchange here, so doing it first moves it off the
+    // latency-sensitive stretch between focus landing and the keys arriving
+    // — and overlaps it with the window manager's focus handoff instead.
+    let Some(keys) = paste_keys(&connection) else {
+        eprintln!("lionclip: auto-paste failed stage=keycode-lookup");
+        return false;
+    };
+
+    let focus_wait_started = Instant::now();
     if !wait_for_focus_confirmation(&connection, root, target.xid) {
         eprintln!("lionclip: auto-paste skipped stage=focus-not-confirmed");
         return false;
     }
+    let focus_wait = focus_wait_started.elapsed();
 
-    if synthesize_ctrl_v(&connection, root) {
-        true
-    } else {
+    if !synthesize_ctrl_v(&connection, root, keys) {
         eprintln!("lionclip: auto-paste failed stage=key-synthesis");
-        false
+        return false;
     }
+
+    // Timings only, no payload: `focus_wait` is how long the window manager
+    // took to hand focus back, which is the part LionClip waits on and
+    // cannot skip, and `total` is everything this attempt did. Together they
+    // separate compositor latency from LionClip's own.
+    eprintln!(
+        "lionclip: auto-paste sent focus_wait_ms={} total_ms={}",
+        focus_wait.as_millis(),
+        started.elapsed().as_millis()
+    );
+    true
 }
 
 /// Asks the window manager to activate `target` via the standard EWMH
@@ -296,19 +325,31 @@ fn holds_focus<C: Connection>(connection: &C, root: u32, target: u32) -> bool {
     toplevel_under_root(connection, root, focus) == Some(target)
 }
 
-/// Presses and releases Control then V. Every step after a successful press
-/// is attempted regardless of a later failure, so a partial failure can
-/// never leave a modifier logically stuck at the X server.
-fn synthesize_ctrl_v<C: Connection>(connection: &C, root: u32) -> bool {
-    let (Some(control), Some(v)) = (
-        keycode_for_keysym(connection, XK_CONTROL_L),
-        keycode_for_keysym(connection, XK_LOWERCASE_V),
-    ) else {
-        return false;
-    };
+/// The keycodes the paste combination is made of, resolved once per attempt
+/// from a single keyboard-mapping request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PasteKeys {
+    control: u8,
+    v: u8,
+}
 
-    let send = |type_: u8, keycode: u8| {
-        xtest::fake_input(
+/// Presses and releases Control and V.
+///
+/// The four events are queued without a per-event round trip and confirmed
+/// by a single `sync` at the end, rather than four sequential round trips on
+/// the latency-sensitive stretch between focus landing and the keys
+/// arriving. The X server processes one connection's requests in the order
+/// they were sent, so the releases still follow their presses; queuing them
+/// unconditionally rather than only after a confirmed press is what
+/// guarantees a modifier can never be left logically stuck.
+///
+/// The closing `sync` is not decoration: it is what makes the server have
+/// actually processed the events before this reports success, and before the
+/// connection is dropped.
+fn synthesize_ctrl_v<C: Connection>(connection: &C, root: u32, keys: PasteKeys) -> bool {
+    let mut queued = true;
+    let mut send = |type_: u8, keycode: u8| {
+        queued &= xtest::fake_input(
             connection,
             type_,
             keycode,
@@ -318,21 +359,23 @@ fn synthesize_ctrl_v<C: Connection>(connection: &C, root: u32) -> bool {
             0,
             0,
         )
-        .ok()
-        .and_then(|cookie| cookie.check().ok())
-        .is_some()
+        .is_ok();
     };
 
-    let control_down = send(KEY_PRESS_EVENT, control);
-    let v_down = control_down && send(KEY_PRESS_EVENT, v);
-    let v_up = !v_down || send(KEY_RELEASE_EVENT, v);
-    let control_up = !control_down || send(KEY_RELEASE_EVENT, control);
+    send(KEY_PRESS_EVENT, keys.control);
+    send(KEY_PRESS_EVENT, keys.v);
+    send(KEY_RELEASE_EVENT, keys.v);
+    send(KEY_RELEASE_EVENT, keys.control);
 
-    let _ = connection.flush();
-    control_down && v_down && v_up && control_up
+    queued && connection.sync().is_ok()
 }
 
-fn keycode_for_keysym<C: Connection>(connection: &C, keysym: u32) -> Option<u8> {
+/// Resolves both keycodes from one `GetKeyboardMapping` reply.
+///
+/// The reply covers the whole keycode range and is the largest single
+/// exchange in a paste attempt, so asking for it once for both keysyms
+/// rather than once each matters more than the lookup itself does.
+fn paste_keys<C: Connection>(connection: &C) -> Option<PasteKeys> {
     let setup = connection.setup();
     let min = setup.min_keycode;
     let count = setup.max_keycode.saturating_sub(min).saturating_add(1);
@@ -345,11 +388,19 @@ fn keycode_for_keysym<C: Connection>(connection: &C, keysym: u32) -> Option<u8> 
     if per_keycode == 0 {
         return None;
     }
-    let index = mapping
-        .keysyms
-        .chunks(per_keycode)
-        .position(|chunk| chunk.contains(&keysym))?;
-    min.checked_add(u8::try_from(index).ok()?)
+
+    let keycode_of = |keysym: u32| -> Option<u8> {
+        let index = mapping
+            .keysyms
+            .chunks(per_keycode)
+            .position(|chunk| chunk.contains(&keysym))?;
+        min.checked_add(u8::try_from(index).ok()?)
+    };
+
+    Some(PasteKeys {
+        control: keycode_of(XK_CONTROL_L)?,
+        v: keycode_of(XK_LOWERCASE_V)?,
+    })
 }
 
 /// Integration tests against a real, disposable Xvfb X server.
@@ -539,8 +590,8 @@ mod xvfb_tests {
             "an already-focused target must be confirmed immediately, not after the timeout"
         );
 
-        let control = keycode_for_keysym(&connection, XK_CONTROL_L).unwrap();
-        let v = keycode_for_keysym(&connection, XK_LOWERCASE_V).unwrap();
+        let keys = paste_keys(&connection).unwrap();
+        let (control, v) = (keys.control, keys.v);
         let mut received_control = false;
         let mut received_v = false;
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -620,8 +671,8 @@ mod xvfb_tests {
             target_window
         );
 
-        let control = keycode_for_keysym(&connection, XK_CONTROL_L).unwrap();
-        let v = keycode_for_keysym(&connection, XK_LOWERCASE_V).unwrap();
+        let keys = paste_keys(&connection).unwrap();
+        let (control, v) = (keys.control, keys.v);
         let mut received_control = false;
         let mut received_v = false;
         // The synthesized events are generated by a different connection to
