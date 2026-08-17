@@ -1,4 +1,5 @@
 mod app;
+mod cli;
 mod clipboard;
 mod history;
 mod image_cleanup;

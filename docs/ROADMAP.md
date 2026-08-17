@@ -219,6 +219,13 @@ history was added.
 
 ## Phase 5 — Zorin/GNOME integration and packaging
 
+**Status: implemented and validated from the installed package on the target
+Zorin GNOME/X11 machine.** Command routing, single instance, toggle behavior,
+desktop integration, clipboard capture and the whole
+install/reinstall/upgrade/remove/purge sequence were exercised there; the
+remaining checks are the ones that need eyes on the screen or a real keypress,
+listed in `docs/PHASE5_VALIDATION.md`.
+
 ### Goal
 
 Install and use LionClip like a normal desktop utility.
@@ -247,6 +254,34 @@ Install package, log in, press `Super+V`, use LionClip without manually starting
 - desktop files validate;
 - CI passes from a clean checkout;
 - installation instructions are reproducible.
+
+### Result
+
+The final application ID is `io.github.Pianisuto.LionClip`, used by the binary,
+the desktop entry, the autostart entry, the metainfo and the icon, with a test
+asserting they agree.
+
+The command surface is `lionclip`, `lionclip show`, `lionclip hide`,
+`lionclip toggle`, plus `--help` and `--version`, which are answered before GTK
+is touched. Commands travel to the single resident instance through GIO's
+`HANDLES_COMMAND_LINE`, so no second clipboard monitor can exist and no
+hand-written IPC was added. `toggle` on a visible popup hides it instead of
+re-showing it, so it never re-places a window that is already on screen.
+
+Desktop integration is an XDG autostart entry running the bare `lionclip`
+(resident, no popup), a launcher entry running `lionclip show`, an own lion +
+clipboard icon in the hicolor theme from an SVG source, and `lionclip-shortcut`
+for a conflict-aware, idempotent `Super+V` binding. No GNOME Shell extension.
+
+Packaging is a small `dpkg-deb` script with runtime dependencies computed by
+`dpkg-shlibdeps`. Package removal never deletes `$XDG_DATA_HOME/lionclip`, and
+no maintainer script touches a running process. CI additionally builds the
+release binary, validates the desktop and AppStream files, smoke-tests the CLI
+without a display, builds the `.deb`, asserts its contents and dependencies and
+uploads it as an artifact.
+
+Preferences, retention settings, a pause control and a tray icon were left to
+Phase 6, and no Flatpak/Snap/AppImage path was added.
 
 ---
 

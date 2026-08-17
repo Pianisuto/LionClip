@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="LionClip">
+  <defs>
+    <linearGradient id="badge" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#33200F"/>
+      <stop offset="1" stop-color="#170F0A"/>
+    </linearGradient>
+    <linearGradient id="mane-back" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#C2410C"/>
+      <stop offset="1" stop-color="#8A2908"/>
+    </linearGradient>
+    <linearGradient id="mane-front" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#FDBA5A"/>
+      <stop offset="1" stop-color="#F2760F"/>
+    </linearGradient>
+    <linearGradient id="clip-metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F6F1E8"/>
+      <stop offset="1" stop-color="#D2C8B8"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFF5E7"/>
+      <stop offset="1" stop-color="#FFDFBB"/>
+    </linearGradient>
+    <path id="petal" d="M210 220 C210 172 232 160 256 127 C280 160 302 172 302 220 Z"/>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#badge)"/>
+
+  <!-- Mane: one ring of flame petals, plus a wider ring offset by half a step
+       behind it, so the silhouette survives when the detail disappears. -->
+  <g fill="url(#mane-back)">
+    <g transform="rotate(15 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(45 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(75 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(105 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(135 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(165 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(195 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(225 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(255 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(285 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(315 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+    <g transform="rotate(345 256 280)"><use href="#petal" transform="translate(256 280) scale(1.15) translate(-256 -280)"/></g>
+  </g>
+  <g fill="url(#mane-front)">
+    <use href="#petal"/>
+    <use href="#petal" transform="rotate(30 256 280)"/>
+    <use href="#petal" transform="rotate(60 256 280)"/>
+    <use href="#petal" transform="rotate(90 256 280)"/>
+    <use href="#petal" transform="rotate(120 256 280)"/>
+    <use href="#petal" transform="rotate(150 256 280)"/>
+    <use href="#petal" transform="rotate(180 256 280)"/>
+    <use href="#petal" transform="rotate(210 256 280)"/>
+    <use href="#petal" transform="rotate(240 256 280)"/>
+    <use href="#petal" transform="rotate(270 256 280)"/>
+    <use href="#petal" transform="rotate(300 256 280)"/>
+    <use href="#petal" transform="rotate(330 256 280)"/>
+    <circle cx="256" cy="280" r="116"/>
+  </g>
+
+  <!-- Ears, drawn before the face so the face keeps their inner half. -->
+  <g>
+    <circle cx="186" cy="226" r="24" fill="url(#face)"/>
+    <circle cx="326" cy="226" r="24" fill="url(#face)"/>
+    <circle cx="184" cy="228" r="12" fill="#F59E5B"/>
+    <circle cx="328" cy="228" r="12" fill="#F59E5B"/>
+  </g>
+
+  <!-- The head is the clipboard: a squircle board for a face, and a clip on its
+       top edge that doubles as the tuft on the lion's forehead. Both are cut
+       from the same shape and colour, so nothing foreign sits on the tile. -->
+  <g>
+    <rect x="220" y="176" width="72" height="56" rx="18" fill="url(#clip-metal)"/>
+    <rect x="238" y="192" width="36" height="12" rx="6" fill="#9C9084"/>
+  </g>
+  <rect x="180" y="210" width="152" height="156" rx="54" fill="url(#face)"/>
+
+  <g fill="#3B1C0A">
+    <ellipse cx="230" cy="278" rx="12.5" ry="15.5"/>
+    <ellipse cx="282" cy="278" rx="12.5" ry="15.5"/>
+  </g>
+
+  <g>
+    <path d="M242 306 h28 c8 0 12 9 8 15 l-14 20 c-4 5 -11 5 -15 0 l-14 -20 c-4 -6 0 -15 7 -15 Z" fill="#D9451F"/>
+    <path d="M256 344 v10" fill="none" stroke="#3B1C0A" stroke-width="7" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=LionClip
+Comment=Start the LionClip clipboard history in the background
+Exec=lionclip
+Icon=io.github.Pianisuto.LionClip
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

@@ -16,3 +16,6 @@ x11rb = { version = "0.14.0", features = ["randr"] }
 
 [profile.release]
 lto = "thin"
+# Debug symbols are 13% of the binary (3.38 MB -> 2.93 MB) and are of no use in
+# an installed package; keeping them out costs no build time.
+strip = "symbols"

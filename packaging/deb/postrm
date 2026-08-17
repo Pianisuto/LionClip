@@ -1,0 +1,21 @@
+#!/bin/sh
+# Refreshes the desktop caches after the package files are gone.
+#
+# Clipboard history is user data and is never touched here, not even on purge:
+# it lives in $XDG_DATA_HOME/lionclip (usually ~/.local/share/lionclip), it can
+# belong to any number of users on the machine, and only its owner should
+# decide to delete it.
+set -e
+
+case "$1" in
+remove | purge)
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache --quiet /usr/share/icons/hicolor || true
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q /usr/share/applications || true
+    fi
+    ;;
+esac
+
+exit 0

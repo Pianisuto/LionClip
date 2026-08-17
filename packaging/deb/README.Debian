@@ -1,0 +1,60 @@
+LionClip for Debian/Ubuntu/Zorin
+================================
+
+What the package installs
+-------------------------
+
+  /usr/bin/lionclip                                       the application
+  /usr/bin/lionclip-shortcut                              Super+V setup helper
+  /usr/share/applications/…LionClip.desktop               app launcher entry
+  /etc/xdg/autostart/…LionClip.desktop                    starts it at login
+  /usr/share/icons/hicolor/…/apps/…LionClip.{svg,png}     icon
+  /usr/share/metainfo/…LionClip.metainfo.xml              AppStream metadata
+
+Autostart
+---------
+
+The autostart entry runs `lionclip`, which starts the resident instance and its
+clipboard monitor without opening the popup. Disable it per user with:
+
+    mkdir -p ~/.config/autostart
+    cp /etc/xdg/autostart/io.github.Pianisuto.LionClip.desktop ~/.config/autostart/
+    sed -i 's/^X-GNOME-Autostart-enabled=true/X-GNOME-Autostart-enabled=false/' \
+        ~/.config/autostart/io.github.Pianisuto.LionClip.desktop
+
+Remove that copy to enable it again. GNOME Tweaks writes the same file.
+
+Super+V
+-------
+
+    lionclip-shortcut install     bind Super+V to `lionclip toggle`
+    lionclip-shortcut status      show what Super+V is bound to
+    lionclip-shortcut remove      undo it
+
+Uninstalling
+------------
+
+Remove the Super+V binding first, while the helper is still there:
+
+    lionclip-shortcut remove
+    sudo apt remove lionclip
+
+The autostart entry is not a dpkg conffile, so `remove` takes it away with the
+program instead of leaving the session trying to start a binary that is gone.
+
+Your clipboard history
+----------------------
+
+The history lives in $XDG_DATA_HOME/lionclip (usually ~/.local/share/lionclip)
+and belongs to you: removing or purging the package never deletes it. To delete
+it yourself:
+
+    rm -rf ~/.local/share/lionclip
+
+Upgrades
+--------
+
+Installing a new version replaces the binary on disk but does not restart a
+LionClip that is already running. Log out and back in, or restart it with:
+
+    pkill -x lionclip && setsid lionclip >/dev/null 2>&1 &

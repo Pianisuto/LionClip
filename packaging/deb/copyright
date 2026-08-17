@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: LionClip
+Source: https://github.com/Pianisuto/LionClip
+
+Files: *
+Copyright: 2026 Leonardo Vulczak
+License: LicenseRef-proprietary
+ No license has been selected for LionClip yet. All rights are reserved, and
+ this package is provided for use by the copyright holder and people they hand
+ it to directly. It may not be redistributed until a license is chosen.
