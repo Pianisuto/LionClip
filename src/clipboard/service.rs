@@ -135,6 +135,7 @@ impl ClipboardService {
                         suppression.clone(),
                         paths.clone(),
                         image_cleanup.clone(),
+                        settings.clone(),
                     );
                 } else {
                     // Also the path taken when an image is offered but
@@ -150,6 +151,7 @@ impl ClipboardService {
                         history.clone(),
                         history_changed.clone(),
                         suppression.clone(),
+                        settings.clone(),
                     );
                 }
             }
@@ -192,6 +194,7 @@ fn preferred_image_mime(clipboard: &gdk::Clipboard) -> Option<ImageMime> {
         .find(|mime| serializable.contain_mime_type(mime.as_str()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_text(
     clipboard: gdk::Clipboard,
     sequence: u64,
@@ -200,6 +203,7 @@ fn capture_text(
     history: Rc<RefCell<TextHistory>>,
     history_changed: HistoryChangedCallback,
     suppression: Rc<RefCell<SelfWriteSuppression>>,
+    settings: Rc<SettingsService>,
 ) {
     glib::MainContext::default().spawn_local(async move {
         let read_result = clipboard.read_text_future().await;
@@ -222,6 +226,13 @@ fn capture_text(
         if history.borrow().generation() != generation {
             return;
         }
+        // Re-checked after the asynchronous read rather than only when the
+        // clipboard changed: recording may have been paused while this was
+        // in flight, and "stop capturing new items" has to cover the ones
+        // whose reading merely started earlier.
+        if settings.recording_paused() {
+            return;
+        }
         let update = history.borrow_mut().record(text);
         notify_if_changed(update, &history_changed);
     });
@@ -239,6 +250,7 @@ fn capture_image(
     suppression: Rc<RefCell<SelfWriteSuppression>>,
     paths: StoragePaths,
     image_cleanup: ImageCleanupCoordinator,
+    settings: Rc<SettingsService>,
 ) {
     // Mark the whole asynchronous capture, including blob publication and the
     // history decision, as in-flight. History cleanup cannot unlink an image
@@ -259,6 +271,7 @@ fn capture_image(
             suppression,
             paths,
             image_cleanup,
+            settings,
         )
         .await;
 
@@ -278,6 +291,7 @@ async fn capture_image_task(
     suppression: Rc<RefCell<SelfWriteSuppression>>,
     paths: StoragePaths,
     image_cleanup: ImageCleanupCoordinator,
+    settings: Rc<SettingsService>,
 ) {
     let (stream, negotiated_mime) = match clipboard
         .read_future(&[requested_mime.as_str()], glib::Priority::DEFAULT)
@@ -293,6 +307,7 @@ async fn capture_image_task(
                 history,
                 history_changed,
                 suppression,
+                settings.clone(),
             );
             return;
         }
@@ -321,6 +336,7 @@ async fn capture_image_task(
                 history,
                 history_changed,
                 suppression,
+                settings.clone(),
             );
             return;
         }
@@ -338,6 +354,7 @@ async fn capture_image_task(
             history,
             history_changed,
             suppression,
+            settings.clone(),
         );
         return;
     }
@@ -363,6 +380,7 @@ async fn capture_image_task(
                 history,
                 history_changed,
                 suppression,
+                settings.clone(),
             );
             return;
         }
@@ -376,6 +394,7 @@ async fn capture_image_task(
                 history,
                 history_changed,
                 suppression,
+                settings.clone(),
             );
             return;
         }
@@ -392,9 +411,14 @@ async fn capture_image_task(
         return;
     }
 
-    // Same bulk-clear guard as `capture_text`, covering the much longer
-    // window an image capture spends decoding and writing its blob.
-    let update = if history.borrow().generation() == generation {
+    // Both guards are re-evaluated here rather than only when the clipboard
+    // changed. This capture spent real time decoding and writing its blob,
+    // during which the user may have paused recording, turned off image
+    // capture, or cleared the history; none of those should be undone by an
+    // item that merely started arriving earlier. A rejected image hands its
+    // freshly written blob to the cleanup coordinator below.
+    let policy_allows = !settings.recording_paused() && settings.save_images();
+    let update = if policy_allows && history.borrow().generation() == generation {
         history.borrow_mut().record_image(stored.image.clone())
     } else {
         HistoryUpdate::Rejected
@@ -405,6 +429,7 @@ async fn capture_image_task(
     notify_if_changed(update, &history_changed);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fallback_to_text(
     clipboard: gdk::Clipboard,
     sequence: u64,
@@ -413,6 +438,7 @@ fn fallback_to_text(
     history: Rc<RefCell<TextHistory>>,
     history_changed: HistoryChangedCallback,
     suppression: Rc<RefCell<SelfWriteSuppression>>,
+    settings: Rc<SettingsService>,
 ) {
     if change_sequence.get() != sequence {
         return;
@@ -425,6 +451,7 @@ fn fallback_to_text(
         history,
         history_changed,
         suppression,
+        settings,
     );
 }
 

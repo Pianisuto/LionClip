@@ -21,9 +21,65 @@ use crate::{
 const WINDOW_WIDTH: i32 = 480;
 const WINDOW_HEIGHT: i32 = 480;
 
+/// The preferences window plus the rows whose displayed state has to be
+/// re-read from the settings before it is shown again.
+///
+/// The window is built once and reused, so its widgets would otherwise keep
+/// whatever value they were constructed with. Settings can change while it
+/// is closed — the popup's own *Resume* button clears the pause, and
+/// `gsettings`/dconf can write from outside the process entirely — and a
+/// switch still showing the old value would be lying about the state it is
+/// supposed to control.
+pub struct PreferencesWindow {
+    window: adw::PreferencesWindow,
+    rows: Rc<Rows>,
+}
+
+impl PreferencesWindow {
+    /// Shows the window, re-reading every control from the settings first.
+    pub fn present(&self) {
+        self.rows.refresh();
+        self.window.present();
+    }
+}
+
+struct Rows {
+    settings: Rc<SettingsService>,
+    auto_paste: adw::SwitchRow,
+    recording_paused: adw::SwitchRow,
+    history_limit: adw::ComboRow,
+    save_images: adw::SwitchRow,
+    start_at_login: adw::SwitchRow,
+    /// Set while [`Rows::refresh`] writes the stored values into the widgets,
+    /// so the change handlers can tell a programmatic update from a real user
+    /// action and not write the value straight back — which for the autostart
+    /// row would mean touching the filesystem on every open.
+    updating: Cell<bool>,
+}
+
+impl Rows {
+    fn refresh(&self) {
+        self.updating.set(true);
+        self.auto_paste.set_active(self.settings.auto_paste());
+        self.recording_paused
+            .set_active(self.settings.recording_paused());
+        self.save_images.set_active(self.settings.save_images());
+        self.start_at_login
+            .set_active(self.settings.start_at_login());
+        if let Some(index) = HISTORY_LIMIT_CHOICES
+            .iter()
+            .position(|choice| *choice == self.settings.history_limit())
+            .and_then(|index| u32::try_from(index).ok())
+        {
+            self.history_limit.set_selected(index);
+        }
+        self.updating.set(false);
+    }
+}
+
 /// Builds the preferences window. The caller owns it and is responsible for
-/// reusing the single instance (see `AppState::show_settings` in
-/// `src/app.rs`): this function only ever needs to run once per process.
+/// reusing the single instance (see `AppState` in `src/app.rs`): this
+/// function only ever needs to run once per process.
 pub fn build(
     application: &adw::Application,
     settings: Rc<SettingsService>,
@@ -31,7 +87,7 @@ pub fn build(
     writer: ClipboardWriter,
     auto_paste_available: bool,
     on_history_changed: impl Fn() + 'static,
-) -> adw::PreferencesWindow {
+) -> PreferencesWindow {
     let on_history_changed: Rc<dyn Fn()> = Rc::new(on_history_changed);
 
     let window = adw::PreferencesWindow::builder()
@@ -51,76 +107,60 @@ pub fn build(
         glib::Propagation::Stop
     });
 
+    let rows = Rc::new(Rows {
+        settings: settings.clone(),
+        auto_paste: adw::SwitchRow::builder()
+            .title("Automatically paste selected items")
+            .subtitle(if auto_paste_available {
+                "Paste the selected item into the app you were using before LionClip."
+            } else {
+                "Automatic paste is currently available on X11 only."
+            })
+            .active(settings.auto_paste())
+            .sensitive(auto_paste_available)
+            .build(),
+        recording_paused: adw::SwitchRow::builder()
+            .title("Pause clipboard recording")
+            .subtitle("Stop capturing new items. Existing history stays available.")
+            .active(settings.recording_paused())
+            .build(),
+        history_limit: history_limit_row(&settings),
+        save_images: adw::SwitchRow::builder()
+            .title("Save copied images")
+            .subtitle("Turn off to stop capturing new images; existing ones are kept.")
+            .active(settings.save_images())
+            .build(),
+        start_at_login: adw::SwitchRow::builder()
+            .title("Start LionClip at login")
+            .active(settings.start_at_login())
+            .build(),
+        updating: Cell::new(false),
+    });
+
+    connect_handlers(&rows, &history, &writer, on_history_changed.clone());
+
+    let behavior = adw::PreferencesGroup::builder().title("Behavior").build();
+    behavior.add(&rows.auto_paste);
+    behavior.add(&rows.recording_paused);
+
+    let history_group = adw::PreferencesGroup::builder().title("History").build();
+    history_group.add(&rows.history_limit);
+    history_group.add(&rows.save_images);
+
+    let system = adw::PreferencesGroup::builder().title("System").build();
+    system.add(&rows.start_at_login);
+
     let page = adw::PreferencesPage::builder().title("Preferences").build();
-    page.add(&behavior_group(&settings, &writer, auto_paste_available));
-    page.add(&history_group(
-        &settings,
-        &history,
-        on_history_changed.clone(),
-    ));
-    page.add(&system_group(&settings));
+    page.add(&behavior);
+    page.add(&history_group);
+    page.add(&system);
     page.add(&data_group(&window, &history, on_history_changed));
     window.add(&page);
 
-    window
+    PreferencesWindow { window, rows }
 }
 
-fn behavior_group(
-    settings: &Rc<SettingsService>,
-    writer: &ClipboardWriter,
-    auto_paste_available: bool,
-) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder().title("Behavior").build();
-
-    let auto_paste = adw::SwitchRow::builder()
-        .title("Automatically paste selected items")
-        .subtitle(if auto_paste_available {
-            "Paste the selected item into the app you were using before LionClip."
-        } else {
-            "Automatic paste is currently available on X11 only."
-        })
-        .active(settings.auto_paste())
-        .sensitive(auto_paste_available)
-        .build();
-    auto_paste.connect_active_notify({
-        let settings = settings.clone();
-        move |row| settings.set_auto_paste(row.is_active())
-    });
-    group.add(&auto_paste);
-
-    let recording_paused = adw::SwitchRow::builder()
-        .title("Pause clipboard recording")
-        .subtitle("Stop capturing new items. Existing history stays available.")
-        .active(settings.recording_paused())
-        .build();
-    recording_paused.connect_active_notify({
-        let settings = settings.clone();
-        let writer = writer.clone();
-        move |row| {
-            let paused = row.is_active();
-            settings.set_recording_paused(paused);
-            if !paused {
-                // A restore performed while paused arms self-write
-                // suppression that a paused clipboard handler never
-                // consumes (it returns before looking at it). Left armed,
-                // it could wrongly suppress the next real external copy
-                // that happens to match the same text after resuming.
-                writer.cancel_pending_self_write();
-            }
-        }
-    });
-    group.add(&recording_paused);
-
-    group
-}
-
-fn history_group(
-    settings: &Rc<SettingsService>,
-    history: &Rc<RefCell<TextHistory>>,
-    on_history_changed: Rc<dyn Fn()>,
-) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder().title("History").build();
-
+fn history_limit_row(settings: &Rc<SettingsService>) -> adw::ComboRow {
     let labels: Vec<String> = HISTORY_LIMIT_CHOICES
         .iter()
         .map(ToString::to_string)
@@ -132,74 +172,97 @@ fn history_group(
         .position(|choice| *choice == settings.history_limit())
         .unwrap_or(HISTORY_LIMIT_CHOICES.len() / 2);
 
-    let history_limit = adw::ComboRow::builder()
+    adw::ComboRow::builder()
         .title("History limit")
         .subtitle("Oldest unpinned items are removed past this many.")
         .model(&model)
         .selected(u32::try_from(selected).unwrap_or(0))
-        .build();
-    history_limit.connect_selected_notify({
-        let settings = settings.clone();
-        let history = history.clone();
-        let on_history_changed = on_history_changed.clone();
+        .build()
+}
+
+fn connect_handlers(
+    rows: &Rc<Rows>,
+    history: &Rc<RefCell<TextHistory>>,
+    writer: &ClipboardWriter,
+    on_history_changed: Rc<dyn Fn()>,
+) {
+    rows.auto_paste.connect_active_notify({
+        let rows = rows.clone();
         move |row| {
+            if rows.updating.get() {
+                return;
+            }
+            rows.settings.set_auto_paste(row.is_active());
+        }
+    });
+
+    rows.recording_paused.connect_active_notify({
+        let rows = rows.clone();
+        let writer = writer.clone();
+        move |row| {
+            if rows.updating.get() {
+                return;
+            }
+            let paused = row.is_active();
+            rows.settings.set_recording_paused(paused);
+            if !paused {
+                // A restore performed while paused arms self-write
+                // suppression that a paused clipboard handler never
+                // consumes (it returns before looking at it). Left armed,
+                // it could wrongly suppress the next real external copy
+                // that happens to match the same text after resuming.
+                writer.cancel_pending_self_write();
+            }
+        }
+    });
+
+    rows.history_limit.connect_selected_notify({
+        let rows = rows.clone();
+        let history = history.clone();
+        move |row| {
+            if rows.updating.get() {
+                return;
+            }
             let Some(&limit) = usize::try_from(row.selected())
                 .ok()
                 .and_then(|index| HISTORY_LIMIT_CHOICES.get(index))
             else {
                 return;
             };
-            settings.set_history_limit(limit);
+            rows.settings.set_history_limit(limit);
             history.borrow_mut().set_unpinned_limit(limit as usize);
             on_history_changed();
         }
     });
-    group.add(&history_limit);
 
-    let save_images = adw::SwitchRow::builder()
-        .title("Save copied images")
-        .subtitle("Turn off to stop capturing new images; existing ones are kept.")
-        .active(settings.save_images())
-        .build();
-    save_images.connect_active_notify({
-        let settings = settings.clone();
-        move |row| settings.set_save_images(row.is_active())
-    });
-    group.add(&save_images);
-
-    group
-}
-
-fn system_group(settings: &Rc<SettingsService>) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder().title("System").build();
-
-    let start_at_login = adw::SwitchRow::builder()
-        .title("Start LionClip at login")
-        .active(settings.start_at_login())
-        .build();
-    let reverting = Rc::new(Cell::new(false));
-    start_at_login.connect_active_notify({
-        let settings = settings.clone();
-        let reverting = reverting.clone();
+    rows.save_images.connect_active_notify({
+        let rows = rows.clone();
         move |row| {
-            if reverting.get() {
+            if rows.updating.get() {
+                return;
+            }
+            rows.settings.set_save_images(row.is_active());
+        }
+    });
+
+    rows.start_at_login.connect_active_notify({
+        let rows = rows.clone();
+        move |row| {
+            if rows.updating.get() {
                 return;
             }
             let desired = row.is_active();
-            if let Err(error) = settings.set_start_at_login(desired) {
+            if let Err(error) = rows.settings.set_start_at_login(desired) {
                 eprintln!(
                     "lionclip: autostart change failed stage={}",
                     error.diagnostic()
                 );
-                reverting.set(true);
+                rows.updating.set(true);
                 row.set_active(!desired);
-                reverting.set(false);
+                rows.updating.set(false);
             }
         }
     });
-    group.add(&start_at_login);
-
-    group
 }
 
 fn data_group(

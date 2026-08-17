@@ -87,14 +87,22 @@ impl PasteCoordinator {
         }
     }
 
-    /// Restores focus to `target` and, only once that is confirmed by a real
-    /// focus event, synthesizes Ctrl+V. Calls `on_done(true)` only if the key
+    /// Restores focus to `target` and, only once the server confirms the
+    /// target still owns it, synthesizes Ctrl+V. `own_window` is LionClip's
+    /// own popup, so the backend can tell "our window is still closing" from
+    /// "the user moved to another application" and decline to steal focus
+    /// back in the latter case. Calls `on_done(true)` only if the key
     /// combination was actually sent; every failure path (destroyed target,
     /// activation not confirmed in time, backend unavailable) calls
     /// `on_done(false)` instead of guessing. Runs off the GTK main thread.
-    pub fn request_paste(&self, target: PasteTarget, on_done: impl FnOnce(bool) + 'static) {
+    pub fn request_paste(
+        &self,
+        target: PasteTarget,
+        own_window: &adw::ApplicationWindow,
+        on_done: impl FnOnce(bool) + 'static,
+    ) {
         match self.backend {
-            Backend::X11 => x11::request_paste(target, on_done),
+            Backend::X11 => x11::request_paste(target, x11::window_xid(own_window), on_done),
             Backend::Unavailable => on_done(false),
         }
     }

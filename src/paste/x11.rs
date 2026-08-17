@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gtk::{gio, glib};
+use gtk::{gio, glib, prelude::*};
 use x11rb::{
     connection::Connection,
     protocol::{
@@ -131,9 +131,13 @@ fn toplevel_under_root<C: Connection>(connection: &C, root: u32, start: u32) -> 
     None
 }
 
-pub(super) fn request_paste(target: PasteTarget, on_done: impl FnOnce(bool) + 'static) {
+pub(super) fn request_paste(
+    target: PasteTarget,
+    own_window: Option<u32>,
+    on_done: impl FnOnce(bool) + 'static,
+) {
     glib::MainContext::default().spawn_local(async move {
-        let sent = match gio::spawn_blocking(move || attempt_paste(target)).await {
+        let sent = match gio::spawn_blocking(move || attempt_paste(target, own_window)).await {
             Ok(sent) => sent,
             Err(_) => {
                 eprintln!("lionclip: auto-paste failed stage=worker-panic");
@@ -148,16 +152,20 @@ pub(super) fn request_paste(target: PasteTarget, on_done: impl FnOnce(bool) + 's
 /// blocking-pool thread with its own connection: this can take up to
 /// [`FOCUS_CONFIRMATION_TIMEOUT`], and none of it may run on the GTK main
 /// thread.
-fn attempt_paste(target: PasteTarget) -> bool {
-    attempt_paste_on(None, target)
+fn attempt_paste(target: PasteTarget, own_window: Option<u32>) -> bool {
+    attempt_paste_on(None, target, own_window)
 }
 
 #[cfg(test)]
-pub(super) fn attempt_paste_for_test(display: &str, target: PasteTarget) -> bool {
-    attempt_paste_on(Some(display), target)
+pub(super) fn attempt_paste_for_test(
+    display: &str,
+    target: PasteTarget,
+    own_window: Option<u32>,
+) -> bool {
+    attempt_paste_on(Some(display), target, own_window)
 }
 
-fn attempt_paste_on(display: Option<&str>, target: PasteTarget) -> bool {
+fn attempt_paste_on(display: Option<&str>, target: PasteTarget, own_window: Option<u32>) -> bool {
     let started = Instant::now();
     let Ok((connection, screen_number)) = x11rb::connect(display) else {
         eprintln!("lionclip: auto-paste failed stage=connection");
@@ -169,7 +177,15 @@ fn attempt_paste_on(display: Option<&str>, target: PasteTarget) -> bool {
     };
     let root = screen.root;
 
-    if connection.get_window_attributes(target.xid).is_err() {
+    // The reply has to be read: sending the request only queues it, and a
+    // `BadWindow` for a destroyed target arrives with the reply, not from
+    // the send. Checking only the send would let a gone target through.
+    if connection
+        .get_window_attributes(target.xid)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .is_none()
+    {
         eprintln!("lionclip: auto-paste skipped stage=target-gone");
         return false;
     }
@@ -180,10 +196,17 @@ fn attempt_paste_on(display: Option<&str>, target: PasteTarget) -> bool {
     // focused: telling a compositor to activate the window it just activated
     // is not free, it makes it run a whole activation cycle whose visible
     // cost lands on the popup the user is watching disappear.
-    let already_focused = holds_focus(&connection, root, target.xid);
-
     let focus_wait_started = Instant::now();
-    if !already_focused {
+    if !holds_focus(&connection, root, target.xid) {
+        // Somebody other than the target and other than LionClip's own popup
+        // holds the focus, which means the user moved on while the popup was
+        // closing. Pulling focus away from whatever they are now using would
+        // be worse than not pasting, so this stops instead of activating.
+        if !focus_is_vacant_or(&connection, root, own_window) {
+            eprintln!("lionclip: auto-paste skipped stage=foreign-window-focused");
+            return false;
+        }
+
         // Selected before requesting activation, so the confirmation event
         // cannot be generated before this client is listening for it. Any
         // number of clients may independently select FocusChangeMask on the
@@ -220,6 +243,25 @@ fn attempt_paste_on(display: Option<&str>, target: PasteTarget) -> bool {
         eprintln!("lionclip: auto-paste failed stage=keycode-lookup");
         return false;
     };
+
+    // Re-confirmed immediately before synthesizing, against the server
+    // rather than against what was true earlier.
+    //
+    // A `FocusIn` only says the target held the focus at the instant it was
+    // emitted; anything could have taken it since, and XTEST delivers to
+    // whoever owns the focus when the server processes the request, not to a
+    // window named in it. Without this, an arbitrarily long gap between
+    // confirmation and synthesis could put clipboard contents into a window
+    // the user never chose.
+    //
+    // This narrows that gap to a single round trip rather than closing it:
+    // X offers no atomic "send this key only if window W still has focus",
+    // so a check-then-act window remains, bounded by the time between this
+    // reply and the server processing the events queued right after it.
+    if !holds_focus(&connection, root, target.xid) {
+        eprintln!("lionclip: auto-paste skipped stage=focus-lost-before-synthesis");
+        return false;
+    }
 
     if !synthesize_ctrl_v(&connection, root, keys) {
         eprintln!("lionclip: auto-paste failed stage=key-synthesis");
@@ -313,16 +355,31 @@ fn wait_for_focus_confirmation<C: Connection>(connection: &C, root: u32, target:
     }
 }
 
+/// Whether nobody else has taken the focus: it is either unset/on the root
+/// (normal while a window is being unmapped) or still on LionClip's own
+/// popup, which is closing. Any other window means the user moved on, and
+/// activating the target would take the focus away from them.
+///
+/// `own_window` being `None` means LionClip's own toplevel could not be
+/// identified; the check then only accepts a vacant focus rather than
+/// assuming an unknown focused window is ours.
+fn focus_is_vacant_or<C: Connection>(connection: &C, root: u32, own_window: Option<u32>) -> bool {
+    let Some(focus) = current_focus(connection) else {
+        return false;
+    };
+    if focus == 0 || focus == 1 || focus == root {
+        return true;
+    }
+    own_window.is_some_and(|own| {
+        focus == own || toplevel_under_root(connection, root, focus) == Some(own)
+    })
+}
+
 /// Whether the keyboard focus currently sits on `target` or on one of its
 /// descendants — an application's focus normally lives on a child window of
 /// the top-level, so an exact match alone would miss the common case.
 fn holds_focus<C: Connection>(connection: &C, root: u32, target: u32) -> bool {
-    let Some(focus) = connection
-        .get_input_focus()
-        .ok()
-        .and_then(|cookie| cookie.reply().ok())
-        .map(|reply| reply.focus)
-    else {
+    let Some(focus) = current_focus(connection) else {
         return false;
     };
     if focus == target {
@@ -333,6 +390,24 @@ fn holds_focus<C: Connection>(connection: &C, root: u32, target: u32) -> bool {
         return false;
     }
     toplevel_under_root(connection, root, focus) == Some(target)
+}
+
+fn current_focus<C: Connection>(connection: &C) -> Option<u32> {
+    connection
+        .get_input_focus()
+        .ok()?
+        .reply()
+        .ok()
+        .map(|reply| reply.focus)
+}
+
+/// LionClip's own toplevel, so focus checks can tell "our popup is still
+/// closing" from "the user moved to another application".
+pub(super) fn window_xid(window: &adw::ApplicationWindow) -> Option<u32> {
+    window
+        .surface()
+        .and_then(|surface| surface.downcast::<gdk4_x11::X11Surface>().ok())
+        .and_then(|surface| surface.xid().try_into().ok())
 }
 
 /// The keycodes the paste combination is made of, resolved once per attempt
@@ -451,15 +526,39 @@ mod xvfb_tests {
         /// `None` rather than panicking when `Xvfb` is not installed, so
         /// `cargo test` still passes on a machine without it; CI installs it
         /// explicitly (see `.github/workflows/rust.yml`).
+        ///
+        /// A display number can already be taken — by a leftover lock file,
+        /// or by anything else on a CI runner — in which case Xvfb exits
+        /// instead of serving it. That is detected and the next number tried,
+        /// rather than waiting out the readiness timeout and failing the test
+        /// for an environmental reason.
         fn spawn() -> Option<Self> {
             static NEXT_DISPLAY: AtomicU32 = AtomicU32::new(90);
-            let number = NEXT_DISPLAY.fetch_add(1, Ordering::Relaxed);
-            let display = format!(":{number}");
+            for _ in 0..16 {
+                let number = NEXT_DISPLAY.fetch_add(1, Ordering::Relaxed);
+                if let Some(guard) = Self::spawn_on(format!(":{number}"))? {
+                    return Some(guard);
+                }
+            }
+            panic!("no free display number for Xvfb after 16 attempts");
+        }
 
+        /// `None` means Xvfb is not installed at all (give up entirely);
+        /// `Some(None)` means this display number did not work out (try the
+        /// next one).
+        fn spawn_on(display: String) -> Option<Option<Self>> {
             let child = match Command::new("Xvfb")
                 .arg(&display)
                 .args(["-screen", "0", "1x1x24"])
                 .args(["-nolisten", "tcp"])
+                // Without this the server resets itself the moment its last
+                // client disconnects, destroying every resource and dropping
+                // connections with "Connection reset by peer". Both the
+                // readiness probe below and the paste attempts themselves use
+                // short-lived connections, so the client count legitimately
+                // reaches zero between steps; `-noreset` is what makes that
+                // harmless instead of a race.
+                .arg("-noreset")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -471,15 +570,22 @@ mod xvfb_tests {
 
             // Bounded wait for the server to actually accept connections:
             // each iteration is a real connection attempt, not a blind delay.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while x11rb::connect(Some(&guard.display)).is_err() {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if x11rb::connect(Some(&guard.display)).is_ok() {
+                    return Some(Some(guard));
+                }
+                // Xvfb exiting means this display number is unusable; there
+                // is nothing to wait for, so stop waiting for it.
+                if matches!(guard.child.try_wait(), Ok(Some(_))) {
+                    return Some(None);
+                }
                 if Instant::now() >= deadline {
                     let _ = guard.child.kill();
-                    panic!("Xvfb on {} did not become ready in time", guard.display);
+                    return Some(None);
                 }
                 thread::sleep(Duration::from_millis(20));
             }
-            Some(guard)
         }
     }
 
@@ -603,7 +709,7 @@ mod xvfb_tests {
         // reaction to `_NET_ACTIVE_WINDOW`, and Xvfb has no compositor. See
         // `docs/PHASE6_VALIDATION.md` for the real-session check.
         let started = Instant::now();
-        assert!(attempt_paste_for_test(&xvfb.display, target));
+        assert!(attempt_paste_for_test(&xvfb.display, target, None));
         assert!(
             started.elapsed() < FOCUS_CONFIRMATION_TIMEOUT,
             "an already-focused target must be confirmed immediately, not after the timeout"
@@ -632,6 +738,58 @@ mod xvfb_tests {
         );
     }
 
+    /// The user moving to a different application while the popup closes
+    /// must not have the focus yanked back, nor the clipboard pasted
+    /// somewhere they never chose.
+    #[test]
+    fn a_foreign_window_holding_focus_aborts_without_stealing_it_back() {
+        let Some(xvfb) = XvfbGuard::spawn() else {
+            eprintln!("skipping: Xvfb not available");
+            return;
+        };
+        let (connection, _) = x11rb::connect(Some(&xvfb.display)).unwrap();
+        let root = root_of(&connection);
+        let target_window = create_test_window(&connection, root);
+        let foreign_window = create_test_window(&connection, root);
+
+        connection
+            .set_input_focus(InputFocus::PARENT, target_window, x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        let target =
+            capture_target_for_test(&xvfb.display).expect("target window should be captured");
+
+        // A third window takes the focus, and it is not LionClip's own
+        // popup, so it stands for the user having moved on.
+        connection
+            .set_input_focus(InputFocus::PARENT, foreign_window, x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        connection.sync().unwrap();
+        while matches!(connection.poll_for_event(), Ok(Some(_))) {}
+
+        assert!(!attempt_paste_for_test(
+            &xvfb.display,
+            target,
+            Some(create_test_window(&connection, root))
+        ));
+
+        // The foreign window must still hold the focus, and no key may have
+        // been delivered anywhere.
+        assert_eq!(
+            connection.get_input_focus().unwrap().reply().unwrap().focus,
+            foreign_window
+        );
+        while let Ok(Some(event)) = connection.poll_for_event() {
+            assert!(
+                !matches!(event, Event::KeyPress(_) | Event::KeyRelease(_)),
+                "nothing may be synthesized when a foreign window holds the focus"
+            );
+        }
+    }
+
     #[test]
     fn a_destroyed_target_is_rejected_and_nothing_is_synthesized() {
         let Some(xvfb) = XvfbGuard::spawn() else {
@@ -646,7 +804,7 @@ mod xvfb_tests {
         connection.destroy_window(window).unwrap().check().unwrap();
         connection.sync().unwrap();
 
-        assert!(!attempt_paste_for_test(&xvfb.display, target));
+        assert!(!attempt_paste_for_test(&xvfb.display, target, None));
     }
 
     #[test]
@@ -680,7 +838,11 @@ mod xvfb_tests {
             .unwrap();
         connection.sync().unwrap();
 
-        assert!(attempt_paste_for_test(&xvfb.display, target));
+        assert!(attempt_paste_for_test(
+            &xvfb.display,
+            target,
+            Some(decoy_window)
+        ));
 
         // Focus must have been handed back to the target, not left on the
         // decoy, and the synthesized Control_L/V presses must show up only

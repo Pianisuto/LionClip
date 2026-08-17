@@ -459,6 +459,16 @@ preferences window calls `TextHistory::set_unpinned_limit` directly, which
 runs the existing `enforce_retention` path immediately, the same one that
 already runs after every insert.
 
+`recording_paused` and `save_images` are additionally re-evaluated right
+before an item is recorded, not only when the clipboard changed. A capture is
+not instantaneous — an image spends real time being decoded and written to
+its blob — and the user can pause recording or turn image capture off during
+exactly that window. "Stop capturing new items" has to cover the item whose
+processing merely started earlier, so a capture that no longer passes the
+policy is dropped and its freshly written blob handed to the
+`ImageCleanupCoordinator`: the same treatment the generation check gives a
+capture overtaken by a bulk clear.
+
 ### Preferences window
 
 `AdwPreferencesWindow` (`src/settings/window.rs`) is a normal GNOME window,
@@ -598,7 +608,11 @@ Every step either confirms real state or gives up; nothing assumes success:
 
 1. the target's existence is re-checked at paste time, not just at capture
    time — a destroyed target fails safe;
-2. activation is requested **only when the target is not already focused**.
+2. activation is requested **only when the target is not already focused,
+   and only when nobody else has taken the focus meanwhile**. If a window
+   that is neither the target nor LionClip's own closing popup holds it, the
+   user moved on, and pulling focus away from what they are now using would
+   be worse than not pasting, so the attempt stops instead.
    Hiding the popup already makes the window manager hand focus back, and in
    practice it has by the time this runs, so the request is usually
    unnecessary — and not free: telling a compositor to activate the window
@@ -609,23 +623,32 @@ Every step either confirms real state or gives up; nothing assumes success:
    focus back to a window LionClip itself observed holding it moments
    earlier — the specific case focus-stealing prevention exists to allow,
    not the case it exists to block;
-3. key synthesis only runs once real server state confirms the target owns
-   the keyboard focus — either a `GetInputFocus` query already reporting it
-   (or one of its descendants, since an application's focus normally sits on
-   a child of the top-level), or a `FocusIn` event saying it just gained it.
-   Both checks are needed: hiding the popup unmaps it, which makes the
-   window manager hand focus back to the target on its own, and when that
-   lands first the activation request changes nothing and no `FocusIn` is
-   ever generated. Waiting only for the event would then time out and skip a
-   paste whose target is already exactly where it needs to be. The pair is
-   polled non-blocking with a short pause between attempts and a bounded
-   ~400 ms deadline; the pause is only how often the server is asked, and a
-   timeout fails safe rather than guessing;
-4. Control and V key presses are synthesized through XTEST, with every
+3. focus is confirmed from real server state — either a `GetInputFocus`
+   query already reporting the target (or one of its descendants, since an
+   application's focus normally sits on a child of the top-level), or a
+   `FocusIn` event saying it just gained it. Both are needed: hiding the
+   popup unmaps it, which makes the window manager hand focus back to the
+   target on its own, and when that lands first the activation request
+   changes nothing and no `FocusIn` is ever generated. Waiting only for the
+   event would then time out and skip a paste whose target is already
+   exactly where it needs to be. The pair is polled non-blocking with a
+   short pause between attempts and a bounded ~400 ms deadline; the pause is
+   only how often the server is asked, and a timeout fails safe;
+4. that confirmation is then **re-checked immediately before synthesizing**.
+   A `FocusIn` only says the target held the focus at the instant it was
+   emitted, and XTEST delivers to whoever owns the focus when the server
+   processes the request — not to a window named in it — so without a final
+   check an arbitrarily long gap could put clipboard contents into a window
+   the user never chose. This narrows the gap to a single round trip rather
+   than closing it: X offers no atomic "send this key only if window W still
+   has focus", so a check-then-act window remains, bounded by the time
+   between that reply and the server processing the events queued right
+   after it;
+5. Control and V key presses are synthesized through XTEST, with every
    already-pressed key unconditionally released even if a later step fails,
    so a partial failure can never leave a modifier logically stuck at the X
    server;
-5. the whole validate/activate/confirm/synthesize sequence runs off the GTK
+6. the whole validate/activate/confirm/synthesize sequence runs off the GTK
    main thread (`gio::spawn_blocking`, the same pattern image processing
    already uses), because it can take up to the confirmation deadline.
 

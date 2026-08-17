@@ -15,7 +15,7 @@ use crate::{
     paste::{self, PasteCoordinator, PasteTarget},
     popup::{self, HistoryPopup},
     positioning::{PointerAnchor, Positioner, SessionDiagnostics},
-    settings::{SettingsService, build_preferences_window},
+    settings::{PreferencesWindow, SettingsService, build_preferences_window},
     storage::{self, StoragePaths},
     unix_signals,
 };
@@ -113,7 +113,7 @@ struct AppState {
     /// The single preferences window instance. Like the popup, it hides
     /// rather than closes, so every `lionclip settings` invocation and every
     /// "Preferences" menu click reuses it instead of building a second one.
-    settings_window: adw::PreferencesWindow,
+    settings_window: Rc<PreferencesWindow>,
     /// Pointer sample of the placement made before the popup was mapped, so the
     /// placement that runs at map time agrees with it.
     pending_anchor: Rc<Cell<Option<PointerAnchor>>>,
@@ -169,7 +169,7 @@ impl AppState {
         // hold a handle to it; it only ever needs `history_changed`'s shared
         // callback cell to ask the popup to refresh, not the popup itself, so
         // construction order between the two does not otherwise matter.
-        let settings_window = build_preferences_window(
+        let settings_window = Rc::new(build_preferences_window(
             application,
             settings.clone(),
             history.clone(),
@@ -184,7 +184,13 @@ impl AppState {
                     }
                 }
             },
-        );
+        ));
+
+        // The restore closure needs the popup's own window to tell "our popup
+        // is still closing" from "the user moved to another application", but
+        // it is built before the popup exists, so the window is bound right
+        // after `popup::build` returns and read only when an item is chosen.
+        let popup_window: Rc<RefCell<Option<adw::ApplicationWindow>>> = Rc::new(RefCell::new(None));
 
         let popup = Rc::new(popup::build(
             application,
@@ -195,6 +201,7 @@ impl AppState {
                 let history = history.clone();
                 let settings = settings.clone();
                 let pending_paste_target = pending_paste_target.clone();
+                let popup_window = popup_window.clone();
 
                 move |id| {
                     // Measured from the moment the user's choice reaches the
@@ -223,10 +230,10 @@ impl AppState {
 
                     let behavior =
                         paste::decide(settings.auto_paste(), target.is_some(), restore_succeeded);
-                    if let (paste::SelectionBehavior::RestoreAndPaste, Some(target)) =
-                        (behavior, target)
+                    if let (paste::SelectionBehavior::RestoreAndPaste, Some(target), Some(window)) =
+                        (behavior, target, popup_window.borrow().as_ref())
                     {
-                        paste.request_paste(target, move |sent| {
+                        paste.request_paste(target, window, move |sent| {
                             println!(
                                 "lionclip: auto-paste result sent={sent} restore_ms={restore_ms} \
                                  activation_to_keys_ms={}",
@@ -247,6 +254,8 @@ impl AppState {
                 move || settings_window.present()
             },
         ));
+
+        *popup_window.borrow_mut() = Some(popup.window.clone());
 
         // Revealing happens when the window is mapped, never from a frame
         // clock: a popup that maps without becoming visible gets no frames, and

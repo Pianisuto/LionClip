@@ -8,7 +8,7 @@ everything that needs a real desktop. Read `AGENTS.md` and
 
 ## Verified automatically
 
-`cargo test --all-features` (106 tests) covers:
+`cargo test --all-features` (107 tests) covers:
 
 - **Settings persistence** — defaults match the schema; each setting
   persists across reads; the history-limit setter snaps an out-of-range value
@@ -39,8 +39,13 @@ everything that needs a real desktop. Read `AGENTS.md` and
   Ctrl+V) hands focus back to the target and delivers both key events only
   to that window, never to a decoy that had focus in between; and a target
   that *already* holds focus is confirmed immediately rather than waiting
-  out the timeout for a `FocusIn` event the server will never send
-  (`src/paste/x11.rs::xvfb_tests`). There is no window manager under Xvfb, so
+  out the timeout for a `FocusIn` event the server will never send; and a
+  foreign window holding the focus aborts the attempt, leaving that window's
+  focus untouched and synthesizing nothing (`src/paste/x11.rs::xvfb_tests`).
+  The Xvfb servers are started with `-noreset`, without which the server
+  restarts itself the moment its last client disconnects — which the
+  short-lived connections here legitimately cause — and drops connections
+  with "Connection reset by peer". There is no window manager under Xvfb, so
   the `_NET_ACTIVE_WINDOW` half of activation is exercised only on the real
   target machine (see below); the direct `SetInputFocus` path is what these
   tests confirm.
@@ -70,6 +75,12 @@ have **not** been exercised beyond code review:
 - GNOME's own "Startup Applications" tool reading back the autostart state
   LionClip's toggle writes.
 - Any Wayland-session behavior at all.
+- The final focus re-check immediately before key synthesis narrows a
+  check-then-act race that cannot be closed at the X protocol level (there
+  is no atomic "send this key only if window W still has focus"). Its
+  correctness rests on the code path and on reasoning about ordering, not on
+  a deterministic test: reproducing a focus change inside that window would
+  need a hook that does not otherwise exist.
 
 ## Manual QA checklist
 
