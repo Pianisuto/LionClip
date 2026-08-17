@@ -45,6 +45,12 @@ install -D -m 644 "$packaging/autostart/$APPLICATION_ID.desktop" \
     "$staging/etc/xdg/autostart/$APPLICATION_ID.desktop"
 install -D -m 644 "$packaging/metainfo/$APPLICATION_ID.metainfo.xml" \
     "$staging/usr/share/metainfo/$APPLICATION_ID.metainfo.xml"
+# Only the schema source is shipped, never a compiled gschemas.compiled: that
+# file is the merge of every schema on the system, so packaging our own would
+# clobber every other application's compiled schemas. postinst/postrm compile
+# it in place instead, the same way they refresh the icon and desktop caches.
+install -D -m 644 "$packaging/schemas/$APPLICATION_ID.gschema.xml" \
+    "$staging/usr/share/glib-2.0/schemas/$APPLICATION_ID.gschema.xml"
 install -D -m 644 "$packaging/deb/copyright" "$staging/usr/share/doc/$PACKAGE/copyright"
 install -D -m 644 "$packaging/deb/README.Debian" "$staging/usr/share/doc/$PACKAGE/README.Debian"
 gzip -9nc "$packaging/deb/changelog" >"$staging/usr/share/doc/$PACKAGE/changelog.Debian.gz"

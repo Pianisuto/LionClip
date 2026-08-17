@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LionClip preference storage. This is the only persisted user configuration;
+  clipboard history itself stays in SQLite (src/history/repository.rs) and is
+  never mixed with these keys. "Start at login" is deliberately not a key
+  here: its effective state is the presence/absence of a per-user XDG
+  autostart override file, so the filesystem stays the single source of
+  truth for it (see src/settings/autostart.rs).
+-->
+<schemalist>
+  <schema id="io.github.Pianisuto.LionClip" path="/io/github/Pianisuto/LionClip/">
+    <key name="history-limit" type="i">
+      <range min="100" max="1000"/>
+      <default>500</default>
+      <summary>Maximum number of unpinned history items</summary>
+      <description>
+        Oldest unpinned items are removed once this limit is exceeded. Pinned
+        items are never counted against it. The preferences window only
+        offers 100, 250, 500 and 1000; other in-range values are accepted and
+        snapped to the nearest of those on the next write.
+      </description>
+    </key>
+    <key name="save-images" type="b">
+      <default>true</default>
+      <summary>Capture images copied to the clipboard</summary>
+      <description>
+        When disabled, newly copied images are not added to history, but
+        images already in history are kept and a plain-text representation
+        offered alongside an ignored image is still captured normally.
+      </description>
+    </key>
+    <key name="recording-paused" type="b">
+      <default>false</default>
+      <summary>Pause clipboard history recording</summary>
+      <description>
+        While paused, no new text or image is captured and no image decoding
+        is started. Existing history stays fully usable: search, restore,
+        pin, delete and clear all keep working.
+      </description>
+    </key>
+    <key name="auto-paste" type="b">
+      <default>false</default>
+      <summary>Paste the selected item into the previously focused app</summary>
+      <description>
+        When enabled, choosing a history item also asks the application that
+        was focused before LionClip opened to paste it, on sessions where
+        this can be done safely. Restoring the item to the clipboard always
+        happens either way; only the automatic paste step depends on this
+        setting and on backend support (X11 in this release).
+      </description>
+    </key>
+  </schema>
+</schemalist>

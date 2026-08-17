@@ -15,6 +15,13 @@ remove | purge)
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database -q /usr/share/applications || true
     fi
+    if command -v glib-compile-schemas >/dev/null 2>&1; then
+        # Drops LionClip's keys from the merged gschemas.compiled now that
+        # its .gschema.xml is gone; the user's own preference values stay in
+        # their dconf database regardless, the same way clipboard history
+        # above is never touched by remove or purge.
+        glib-compile-schemas /usr/share/glib-2.0/schemas || true
+    fi
     ;;
 esac
 
