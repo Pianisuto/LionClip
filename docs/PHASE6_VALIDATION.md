@@ -131,8 +131,10 @@ Run on the target Zorin GNOME/X11 machine, from the installed package
    confirm the oldest unpinned items (and, for images, their thumbnail/blob
    files under `~/.local/share/lionclip`) disappear immediately, pinned
    items are untouched, and no restart was needed.
-   Then, with Preferences **closed** and more than 100 unpinned items again,
-   change the limit from outside the process:
+   Then test the external path. Set the limit back to 1000 in the window,
+   close Preferences, and build the history back up past 100 unpinned items
+   — GSettings emits nothing when a write does not change the value, so the
+   next step has to be a real change. With Preferences **closed**:
 
    ```bash
    gsettings set io.github.Pianisuto.LionClip history-limit 100
@@ -140,8 +142,8 @@ Run on the target Zorin GNOME/X11 machine, from the installed package
 
    The running instance must shrink its history the same way — open the
    popup and confirm the count, without restarting LionClip and without
-   having opened Preferences. Pinned items must survive. Reopen Preferences
-   afterwards and confirm the combo row shows 100.
+   having opened Preferences at any point. Pinned items must survive.
+   Reopen Preferences afterwards and confirm the combo row shows 100.
 6. **Save copied images** — turn off, copy a new screenshot: it must not
    appear in history, but copying new text still works. Copy an image from
    an app that also offers a text representation (e.g. a file manager
