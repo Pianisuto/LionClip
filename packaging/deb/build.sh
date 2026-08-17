@@ -4,9 +4,11 @@
 #   packaging/deb/build.sh [output-directory]
 #
 # Everything the package contains comes from the repository or from
-# `cargo build --release`; the runtime dependencies come from dpkg-shlibdeps
-# reading the built binary, so they cannot drift from what LionClip links
-# against. Set SKIP_BUILD=1 to package a release binary that is already built.
+# `cargo build --release`; the shared-library dependencies come from
+# dpkg-shlibdeps reading the built binary, so they cannot drift from what
+# LionClip links against. What the maintainer scripts run is declared
+# separately below, because dpkg-shlibdeps cannot see it.
+# Set SKIP_BUILD=1 to package a release binary that is already built.
 set -euo pipefail
 
 readonly APPLICATION_ID=io.github.Pianisuto.LionClip
@@ -83,6 +85,15 @@ if [ -z "$depends" ]; then
     exit 1
 fi
 
+# dpkg-shlibdeps only sees what the binary links against, so anything the
+# maintainer scripts need has to be declared by hand. postinst/postrm run
+# glib-compile-schemas to build /usr/share/glib-2.0/schemas/gschemas.compiled
+# in place; without it the preferences schema is installed but never compiled,
+# and LionClip falls back to unpersisted defaults. On Ubuntu/Zorin noble that
+# binary comes from libglib2.0-bin (verified with `dpkg -S`), which is not
+# guaranteed to be present just because the GLib shared library is.
+readonly MAINTAINER_SCRIPT_DEPENDS='hicolor-icon-theme, libglib2.0-bin'
+
 installed_size=$(du -ks "$staging" | cut -f1)
 
 install -d -m 755 "$staging/DEBIAN"
@@ -92,7 +103,7 @@ Version: $version
 Architecture: $arch
 Maintainer: $MAINTAINER
 Installed-Size: $installed_size
-Depends: $depends, hicolor-icon-theme
+Depends: $depends, $MAINTAINER_SCRIPT_DEPENDS
 Section: utils
 Priority: optional
 Homepage: https://github.com/Pianisuto/LionClip

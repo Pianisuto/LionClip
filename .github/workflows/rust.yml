@@ -157,7 +157,12 @@ jobs:
 
           depends=$(dpkg-deb --field "$package" Depends)
           echo "Depends: $depends"
-          for runtime in libgtk-4-1 libadwaita-1-0 libgdk-pixbuf-2.0-0; do
+          # libgtk-4-1/libadwaita-1-0/libgdk-pixbuf-2.0-0 come from
+          # dpkg-shlibdeps. libglib2.0-bin does not: it provides the
+          # glib-compile-schemas that postinst/postrm run, which no amount
+          # of inspecting the binary can reveal, so it has to stay declared
+          # by hand in packaging/deb/build.sh.
+          for runtime in libgtk-4-1 libadwaita-1-0 libgdk-pixbuf-2.0-0 libglib2.0-bin; do
             case "$depends" in
               *"$runtime"*) ;;
               *) echo "missing runtime dependency: $runtime" >&2; exit 1 ;;
