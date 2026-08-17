@@ -534,8 +534,13 @@ is a session-scoped GUI client that needs the session's display and D-Bus, which
 is exactly what XDG autostart provides, and because GNOME's own tooling
 (Tweaks, and a per-user copy of the file) already knows how to switch it off.
 
-The file lives under `/etc`, so it is a dpkg conffile: switching autostart off by
-editing it survives upgrades, and purge removes it.
+The entry is deliberately **not** a dpkg conffile, even though it lives under
+`/etc`. dpkg keeps conffiles on `remove` and deletes them only on `purge`, so
+declaring it would leave an autostart entry asking the session to run a
+`/usr/bin/lionclip` that `remove` had just deleted. It holds no user
+configuration to preserve either: the supported way to switch autostart off is a
+per-user copy in `~/.config/autostart`, which is where GNOME's own tools write
+it, which overrides the system entry, and which no package operation touches.
 
 ### Super+V
 
@@ -559,7 +564,7 @@ file list are all visible in one place.
 /usr/bin/lionclip
 /usr/bin/lionclip-shortcut
 /usr/share/applications/<app-id>.desktop
-/etc/xdg/autostart/<app-id>.desktop          (conffile)
+/etc/xdg/autostart/<app-id>.desktop
 /usr/share/icons/hicolor/scalable/apps/<app-id>.svg
 /usr/share/icons/hicolor/{16,24,32,48,64,128,256}x*/apps/<app-id>.png
 /usr/share/metainfo/<app-id>.metainfo.xml

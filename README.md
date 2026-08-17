@@ -110,10 +110,18 @@ Reinstalling the same version works the same way.
 
 ## Uninstall
 
+Drop the `Super+V` binding first, while the helper is still installed —
+otherwise the shortcut stays behind in GSettings pointing at a command that no
+longer exists:
+
 ```bash
-sudo apt remove lionclip     # remove the program
-sudo apt purge lionclip      # also remove the autostart entry from /etc
+lionclip-shortcut remove
+sudo apt remove lionclip
 ```
+
+`remove` takes the program, the launcher entry, the icon and the autostart entry
+with it. `sudo apt purge lionclip` additionally drops the package's own
+bookkeeping; there is nothing else left in `/etc` for it to clean.
 
 Neither touches your clipboard history.
 

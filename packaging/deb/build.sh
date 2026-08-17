@@ -99,12 +99,12 @@ Description: clipboard history for GNOME and Zorin OS
  has no accounts, no sync and no network access.
 EOF
 
-# The autostart entry lives under /etc, so dpkg has to treat local edits, such
-# as switching autostart off, as configuration rather than as package files.
-cat >"$staging/DEBIAN/conffiles" <<EOF
-/etc/xdg/autostart/$APPLICATION_ID.desktop
-EOF
-
+# The autostart entry is deliberately not a conffile. dpkg keeps conffiles on
+# remove and only deletes them on purge, which would leave an autostart entry
+# asking the session to run a /usr/bin/lionclip that remove had just deleted.
+# It holds no user configuration to preserve either: switching autostart off is
+# a per-user copy in ~/.config/autostart, which is where GNOME's own tools write
+# it and which no package operation touches.
 install -m 755 "$packaging/deb/postinst" "$staging/DEBIAN/postinst"
 install -m 755 "$packaging/deb/postrm" "$staging/DEBIAN/postrm"
 

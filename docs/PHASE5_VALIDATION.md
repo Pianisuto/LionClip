@@ -52,10 +52,13 @@ Zorin OS, GNOME, X11, two 2560×1440 monitors. The package was installed with
 | Check | Result |
 | --- | --- |
 | `dpkg -L` | binary, helper, both desktop files, 25 icon paths, metainfo, docs |
-| Permissions on disk | `root:root`, 755 binaries, 644 data, autostart is a conffile |
+| Permissions on disk | `root:root`, 755 binaries, 644 data |
 | `Gtk.IconTheme` lookup by icon name | resolves at 16/24/32/48/64/128/256 px to the installed PNGs |
 | `Gio.DesktopAppInfo` for the entry | name `LionClip`, icon `io.github.Pianisuto.LionClip`, exec `lionclip show`, `Terminal=false`, not `NoDisplay` |
 | `lionclip-shortcut install` | adopted the existing development-build shortcut in place, left an unrelated custom shortcut alone |
+| `install --take-over` with two accelerators on the GNOME action | removed only `<Super>v`, kept `<Super>m` |
+| `install --take-over` with `<Super>v` as the only accelerator | left the empty typed array, no failure |
+| `remove` after a take-over | printed the exact `gsettings set` that gives `<Super>v` back next to what is bound now, and the `reset` alternative |
 
 ### Clipboard capture
 
@@ -69,20 +72,26 @@ Run against an isolated `XDG_DATA_HOME` so the real history was not touched:
 
 ### Package lifecycle
 
-One `apt` sequence, checking the binary, the autostart conffile and
+One `apt` sequence, checking the binary, the autostart entry and
 `~/.local/share/lionclip` after every step:
 
 | Step | Package | Binary | Autostart | User data |
 | --- | --- | --- | --- | --- |
-| reinstall same version | 0.1.0 | present | present | 5 files |
-| upgrade to a rebuilt 0.1.1~qa | 0.1.1~qa | present | present | 5 files |
-| `apt remove` | config-files | absent | **present** | 5 files |
-| reinstall after remove | 0.1.0 | present | present | 5 files |
-| `apt purge` | not installed | absent | absent | **5 files** |
-| final install | 0.1.0 | present | present | 5 files |
+| reinstall same version | 0.1.0 | present | present | intact |
+| upgrade to a rebuilt 0.1.1~qa | 0.1.1~qa | present | present | intact |
+| `apt remove` | config-files | absent | **absent** | intact |
+| reinstall after remove | 0.1.0 | present | present | intact |
+| `apt purge` | not installed | absent | absent | **intact** |
+| final install | 0.1.0 | present | present | intact |
 
 The history inventory (names and sizes) was identical before and after the whole
 sequence: neither `remove` nor `purge` touched a byte of it.
+
+The autostart entry going away on `remove` is the point of not declaring it a
+conffile. The transition from the earlier build that did declare one was
+verified on the same machine: upgrading dropped the conffile registration from
+dpkg's status, `remove` then deleted the file rather than leaving it behind, and
+a later reinstall put it back.
 
 ## Still to check by hand
 

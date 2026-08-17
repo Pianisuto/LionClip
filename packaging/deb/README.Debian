@@ -31,6 +31,17 @@ Super+V
     lionclip-shortcut status      show what Super+V is bound to
     lionclip-shortcut remove      undo it
 
+Uninstalling
+------------
+
+Remove the Super+V binding first, while the helper is still there:
+
+    lionclip-shortcut remove
+    sudo apt remove lionclip
+
+The autostart entry is not a dpkg conffile, so `remove` takes it away with the
+program instead of leaving the session trying to start a binary that is gone.
+
 Your clipboard history
 ----------------------
 

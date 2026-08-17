@@ -92,13 +92,37 @@ foreign_custom_binding() {
     return 1
 }
 
+# Reads the accelerators bound to the conflicting GNOME action, one per line.
+gnome_conflict_accelerators() {
+    gsettings get "$GNOME_CONFLICT_SCHEMA" "$GNOME_CONFLICT_KEY" 2>/dev/null |
+        sed 's/^@[a-z]* //' | tr -d "[]' " | tr ',' '\n' | sed '/^$/d'
+}
+
 gnome_conflict() {
-    local value
-    value=$(gsettings get "$GNOME_CONFLICT_SCHEMA" "$GNOME_CONFLICT_KEY" 2>/dev/null || echo "@as []")
-    case "$value" in
-    *"'$BINDING'"*) return 0 ;;
-    *) return 1 ;;
-    esac
+    gnome_conflict_accelerators | grep -qxF "$BINDING"
+}
+
+# Formats accelerators, read one per line, as a GSettings string array.
+as_string_array() {
+    local list
+    list=$(sed "s/.*/'&'/" | paste -sd, -)
+    if [ -z "$list" ]; then
+        echo "@as []"
+    else
+        echo "[$list]"
+    fi
+}
+
+# Takes Super+V away from the GNOME action and leaves its other accelerators
+# alone: the action commonly carries a second key, and clearing the whole list
+# would take that one away too.
+drop_gnome_conflict() {
+    local remaining
+    # grep exits 1 when it filters everything out, which is a normal outcome
+    # here: Super+V may be the only accelerator the action has.
+    remaining=$(gnome_conflict_accelerators | { grep -vxF "$BINDING" || true; } | as_string_array)
+    gsettings set "$GNOME_CONFLICT_SCHEMA" "$GNOME_CONFLICT_KEY" "$remaining"
+    echo "removed $BINDING from GNOME's $GNOME_CONFLICT_KEY, which now has: $remaining"
 }
 
 # Appends a path to custom-keybindings, keeping the list a set.
@@ -114,16 +138,18 @@ add_to_list() {
         {
             printf '%s\n' "$paths"
             printf '%s\n' "$path"
-        } | sed '/^$/d' | sed "s/.*/'&'/" | paste -sd, -
+        } | sed '/^$/d' | as_string_array
     )
-    gsettings set "$LIST_SCHEMA" "$LIST_KEY" "[$list]"
+    gsettings set "$LIST_SCHEMA" "$LIST_KEY" "$list"
 }
 
 remove_from_list() {
-    local path=$1 list
+    local path=$1 remaining
 
-    list=$(custom_paths | grep -vxF "$path" | sed "s/.*/'&'/" | paste -sd, -)
-    gsettings set "$LIST_SCHEMA" "$LIST_KEY" "[$list]"
+    # Removing the only entry leaves an empty list, which grep reports as a
+    # failure and as_string_array writes as the empty typed array.
+    remaining=$(custom_paths | { grep -vxF "$path" || true; } | as_string_array)
+    gsettings set "$LIST_SCHEMA" "$LIST_KEY" "$remaining"
 }
 
 # Picks the first free lionclip-N path, so repeated installs reuse one entry.
@@ -179,8 +205,7 @@ with the command: $COMMAND
 EOF
             exit 1
         fi
-        gsettings set "$GNOME_CONFLICT_SCHEMA" "$GNOME_CONFLICT_KEY" "@as []"
-        echo "cleared GNOME $GNOME_CONFLICT_KEY"
+        drop_gnome_conflict
     fi
 
     if path=$(lionclip_path); then
@@ -204,20 +229,34 @@ EOF
 }
 
 cmd_remove() {
-    local path
+    local path restored
 
-    if ! path=$(lionclip_path); then
+    if path=$(lionclip_path); then
+        remove_from_list "$path"
+        gsettings reset "$ITEM_SCHEMA:$path" name || true
+        gsettings reset "$ITEM_SCHEMA:$path" command || true
+        gsettings reset "$ITEM_SCHEMA:$path" binding || true
+        echo "removed the LionClip keybinding"
+    else
         echo "LionClip has no custom keybinding to remove"
-        return 0
     fi
 
-    remove_from_list "$path"
-    gsettings reset "$ITEM_SCHEMA:$path" name || true
-    gsettings reset "$ITEM_SCHEMA:$path" command || true
-    gsettings reset "$ITEM_SCHEMA:$path" binding || true
-    echo "removed the LionClip keybinding"
-    echo "GNOME's own Super+V default, if you cleared it, is restored with:"
-    echo "  gsettings reset $GNOME_CONFLICT_SCHEMA $GNOME_CONFLICT_KEY"
+    # Only say anything about the GNOME action when it is actually missing
+    # Super+V, and then offer both the exact undo of --take-over, which keeps
+    # whatever else is bound to it now, and the way back to GNOME's default.
+    if ! gnome_conflict; then
+        restored=$(
+            gnome_conflict_accelerators
+            echo "$BINDING"
+        )
+        restored=$(printf '%s\n' "$restored" | sed '/^$/d' | as_string_array)
+        echo
+        echo "GNOME's $GNOME_CONFLICT_KEY has no $BINDING. If you used --take-over,"
+        echo "give it back alongside what is bound to it now:"
+        echo "  gsettings set $GNOME_CONFLICT_SCHEMA $GNOME_CONFLICT_KEY \"$restored\""
+        echo "or restore GNOME's own default for that action:"
+        echo "  gsettings reset $GNOME_CONFLICT_SCHEMA $GNOME_CONFLICT_KEY"
+    fi
 }
 
 main() {
