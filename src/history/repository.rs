@@ -470,9 +470,18 @@ fn delete_ids(
     ids: &[HistoryItemId],
     stage: &'static str,
 ) -> Result<(), PersistenceError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // Prepared once for the whole batch rather than re-parsed per id. Lowering
+    // the history limit from 1000 to 100 deletes 900 rows in one mutation, and
+    // `execute` would compile the same statement 900 times to do it.
+    let mut statement = transaction
+        .prepare("DELETE FROM history_items WHERE id = ?1")
+        .map_err(|_| PersistenceError::at(stage))?;
     for id in ids {
-        transaction
-            .execute("DELETE FROM history_items WHERE id = ?1", [id.value()])
+        statement
+            .execute([id.value()])
             .map_err(|_| PersistenceError::at(stage))?;
     }
     Ok(())
