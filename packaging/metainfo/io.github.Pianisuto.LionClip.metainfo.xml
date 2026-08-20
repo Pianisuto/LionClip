@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.Pianisuto.LionClip</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>LicenseRef-proprietary</project_license>
+  <project_license>MIT</project_license>
   <name>LionClip</name>
   <summary>Search and reuse what you copied</summary>
   <developer id="io.github.pianisuto">
