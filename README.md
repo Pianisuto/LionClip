@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://github.com/Pianisuto/LionClip/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Pianisuto/LionClip?display_name=tag&sort=semver"></a>
   <a href="https://github.com/Pianisuto/LionClip/actions/workflows/rust.yml"><img alt="CI" src="https://github.com/Pianisuto/LionClip/actions/workflows/rust.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="Licença MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-f05a9d"></a>
   <img alt="Linux GNOME/Zorin" src="https://img.shields.io/badge/plataforma-Linux%20%C2%B7%20GNOME%2FZorin-6f5af0">
   <img alt="Dados locais" src="https://img.shields.io/badge/dados-100%25%20locais-35b779">
 </p>
@@ -220,4 +221,4 @@ A arquitetura, decisões de plataforma e roadmap ficam em [`docs/ARCHITECTURE.md
 
 ## Licença
 
-Uma licença ainda não foi selecionada. Enquanto não houver um arquivo `LICENSE`, o fato de o repositório ser público não concede permissão para copiar, modificar ou redistribuir o código além do permitido pelos Termos de Serviço do GitHub.
+Distribuído sob a [licença MIT](LICENSE). Copyright © 2026 Leonardo Vulczak.
