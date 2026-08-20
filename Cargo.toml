@@ -3,6 +3,7 @@ name = "lionclip"
 version = "0.1.0"
 edition = "2024"
 description = "A small native clipboard-history utility for Linux"
+license = "MIT"
 publish = false
 
 [dependencies]
