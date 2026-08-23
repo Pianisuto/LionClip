@@ -257,10 +257,10 @@ impl AppState {
 
         *popup_window.borrow_mut() = Some(popup.window.clone());
 
-        // Revealing happens when the window is mapped, never from a frame
-        // clock: a popup that maps without becoming visible gets no frames, and
-        // the reveal would never run, leaving a mapped but fully transparent
-        // window that `is_visible` still reports as open.
+        // A mapped popup has its final size, so this is the authoritative
+        // placement. Rendering is never gated on a map or frame callback: a
+        // missed callback must not leave a window reported as visible but with
+        // no usable contents.
         let pending_anchor = Rc::new(Cell::new(None));
         popup.window.connect_map({
             let positioner = positioner.clone();
@@ -271,13 +271,12 @@ impl AppState {
                 // authoritative one; it reuses the pointer sample of the
                 // placement made before mapping.
                 let started = Instant::now();
-                let outcome = positioner.place(window, pending_anchor.get());
+                let outcome = positioner.place(window, pending_anchor.take());
                 println!(
                     "{} map_place_us={}",
                     outcome.log_line(),
                     started.elapsed().as_micros()
                 );
-                window.set_opacity(1.0);
             }
         });
 
@@ -340,9 +339,7 @@ impl AppState {
         if self.popup.window.is_visible() {
             // Already open: leave it exactly where it is. Presenting a window
             // that is already on screen lets the compositor lay the toplevel
-            // out again, which reads as the popup jumping. The opacity is
-            // restored defensively, so an open popup can never stay invisible.
-            self.popup.window.set_opacity(1.0);
+            // out again, which reads as the popup jumping.
             if !self.popup.window.is_active() {
                 // Open but not focused is not a state the popup should be able
                 // to reach, and invoking it is the natural way to ask for it
@@ -371,12 +368,10 @@ impl AppState {
         self.popup.prepare();
         let prepare = phase.elapsed();
 
-        // Nothing may be visible before the popup sits at the pointer, and the
-        // window keeps the frame it was hidden with, so hide the content and
-        // place the surface while it is still unmapped.
-        self.popup.window.set_opacity(0.0);
         // Realizing first gives even the very first open a surface to place
-        // before it is mapped.
+        // before it is mapped. Do not hide it with window opacity while it
+        // opens: the compositor can keep a mapped window in that state even
+        // after GTK considers it visible, making later commands unreachable.
         let phase = Instant::now();
         gtk::prelude::WidgetExt::realize(&self.popup.window);
         let realize = phase.elapsed();

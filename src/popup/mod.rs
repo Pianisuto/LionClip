@@ -19,23 +19,20 @@ const PLACEHOLDER_HEIGHT: i32 = 128;
 const LIST_MAX_HEIGHT: i32 = 360;
 
 /// Keeps the popup a single rounded surface and reveals row actions on hover,
-/// selection or keyboard focus. No color is named here: the rounded surface
-/// carries Adwaita's own `.background` style, so light and dark both follow the
-/// system theme.
-///
-/// The toplevel rules matter beyond looks. GTK marks the whole surface opaque
-/// when the window background is opaque, which makes the compositor skip
-/// blending and paint black behind the rounded corners; and a themed window
-/// shadow keeps painting a faint halo into those corners, which reads as a dim
-/// rectangle under the popup, so the toplevel draws nothing at all.
+/// selection or keyboard focus. Both the toplevel and its content explicitly
+/// paint Adwaita's window color: relying on a transparent toplevel left some
+/// GTK/X11 theme combinations with an opaque black backing surface and no
+/// visible child content.
 const POPUP_CSS: &str = "\
 window.lionclip-popup {
-  background-color: transparent;
+  background-color: @window_bg_color;
   box-shadow: none;
   border: none;
+  border-radius: 12px;
 }
 
 .lionclip-surface {
+  background-color: @window_bg_color;
   border-radius: 12px;
 }
 
@@ -906,4 +903,21 @@ fn install_style(display: &gdk::Display) {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::POPUP_CSS;
+
+    #[test]
+    fn popup_surface_has_a_theme_background_without_a_transparent_toplevel() {
+        // A transparent toplevel produced an opaque black X11 surface on the
+        // Zorin/GNOME target, hiding every child widget while the window was
+        // still mapped. Keep the paint source explicit at both levels.
+        assert!(
+            POPUP_CSS.contains("window.lionclip-popup {\n  background-color: @window_bg_color;")
+        );
+        assert!(POPUP_CSS.contains(".lionclip-surface {\n  background-color: @window_bg_color;"));
+        assert!(!POPUP_CSS.contains("window.lionclip-popup {\n  background-color: transparent;"));
+    }
 }
