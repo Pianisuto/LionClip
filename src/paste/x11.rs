@@ -506,12 +506,11 @@ mod xvfb_tests {
         sync::atomic::{AtomicU32, Ordering},
     };
 
-    use x11rb::{
-        protocol::xproto::{
-            ConnectionExt as _, CreateWindowAux, EventMask, InputFocus, WindowClass,
-        },
-        wrapper::ConnectionExt as _,
-    };
+    // `ConnectionExt` — both the `xproto` and the `wrapper` one — already
+    // arrives through `use super::*` below. Naming an anonymous trait import
+    // again cannot shadow the glob the way a named type does, so repeating it
+    // here is redundant and newer rustc rejects it under `-D warnings`.
+    use x11rb::protocol::xproto::{CreateWindowAux, EventMask, InputFocus, WindowClass};
 
     use super::*;
 
