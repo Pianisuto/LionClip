@@ -119,6 +119,27 @@ impl ClipboardService {
 
                 let sequence = change_sequence.get().wrapping_add(1);
                 change_sequence.set(sequence);
+
+                // A restore LionClip just performed. Reading it back would be
+                // a full selection transfer of the payload — up to 25 MiB for
+                // an image, which would then be decoded and re-hashed — purely
+                // to rediscover a value this process already holds. Worse, it
+                // runs on the same main loop that has to serve the paste
+                // target's own request for that selection, so the redundant
+                // read lands directly on the delay between choosing an item
+                // and seeing it pasted.
+                //
+                // `is_local` is the clipboard's own answer to "does this
+                // process own the current content". LionClip writes to the
+                // clipboard only from a restore, and a restore arms the
+                // pending write immediately before writing, so this pair
+                // identifies our own write exactly. Anything else still falls
+                // through to the reading path below, which compares payloads
+                // before suppressing.
+                if clipboard.is_local() && suppression.borrow_mut().take_self_write() {
+                    return;
+                }
+
                 let generation = history.borrow().generation();
 
                 if settings.save_images()

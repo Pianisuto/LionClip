@@ -2,9 +2,9 @@
 //!
 //! Extends the same isolated `x11rb` usage `src/positioning/x11.rs` already
 //! established (per-call connection, no long-lived state, no shelling out to
-//! `xdotool`/`ydotool`) rather than building a second X11 stack. Key
-//! synthesis uses the XTEST extension, which `x11rb` already speaks with the
-//! `xtest` Cargo feature — no new dependency.
+//! `xdotool`/`ydotool`) rather than building a second X11 stack. Key synthesis
+//! uses core `SendEvent` rather than the XTEST extension; see
+//! [`synthesize_ctrl_v`] for the measurement behind that choice.
 //!
 //! Every step here is designed to fail safe: any error, a destroyed target,
 //! or a focus confirmation that does not arrive within a bounded window
@@ -23,9 +23,8 @@ use x11rb::{
         Event,
         xproto::{
             ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt as _, EventMask,
-            InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+            InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, KeyPressEvent,
         },
-        xtest,
     },
     wrapper::ConnectionExt as _,
 };
@@ -33,6 +32,8 @@ use x11rb::{
 /// Sent to the previously focused window when the user picks a history item.
 const XK_CONTROL_L: u32 = 0xffe3;
 const XK_LOWERCASE_V: u32 = 0x0076;
+/// The X modifier bit for Control, carried in the state mask of the V events.
+const CONTROL_MASK: u16 = 1 << 2;
 
 /// How long to wait for the target to report it actually received focus
 /// before giving up. Each iteration below re-checks real server state
@@ -263,7 +264,7 @@ fn attempt_paste_on(display: Option<&str>, target: PasteTarget, own_window: Opti
         return false;
     }
 
-    if !synthesize_ctrl_v(&connection, root, keys) {
+    if !synthesize_ctrl_v(&connection, root, target.xid, keys) {
         eprintln!("lionclip: auto-paste failed stage=key-synthesis");
         return false;
     }
@@ -418,39 +419,85 @@ struct PasteKeys {
     v: u8,
 }
 
-/// Presses and releases Control and V.
+/// Presses and releases Control and V on the window that holds the focus.
 ///
-/// The four events are queued without a per-event round trip and confirmed
-/// by a single `sync` at the end, rather than four sequential round trips on
-/// the latency-sensitive stretch between focus landing and the keys
-/// arriving. The X server processes one connection's requests in the order
-/// they were sent, so the releases still follow their presses; queuing them
-/// unconditionally rather than only after a confirmed press is what
-/// guarantees a modifier can never be left logically stuck.
+/// Uses `SendEvent` rather than the XTEST extension, and that choice is the
+/// whole point of this function. XTEST injects into the X server's input
+/// pipeline, so every synthesized key is also processed by the compositor and,
+/// on GNOME, by its shell extensions. Measured on the target Zorin GNOME/X11
+/// session, that made the compositor stall for long enough to be plainly
+/// visible: the popup sat frozen on screen and only then played its close
+/// animation. Everything LionClip itself does in a paste measures at 15 ms, so
+/// the stall was the entire perceived cost of choosing an item, and it
+/// disappeared completely when the injection was removed.
 ///
-/// The closing `sync` is not decoration: it is what makes the server have
-/// actually processed the events before this reports success, and before the
-/// connection is dropped.
-fn synthesize_ctrl_v<C: Connection>(connection: &C, root: u32, keys: PasteKeys) -> bool {
-    let mut queued = true;
-    let mut send = |type_: u8, keycode: u8| {
-        queued &= xtest::fake_input(
-            connection,
-            type_,
-            keycode,
-            x11rb::CURRENT_TIME,
-            root,
-            0,
-            0,
-            0,
-        )
-        .is_ok();
+/// `SendEvent` delivers the events straight to the target window, never
+/// entering that pipeline, so the compositor and its extensions never see
+/// them. Delaying the XTEST injection instead was measured and rejected: the
+/// stall is a cost, not a schedule, so postponing it only moved it.
+///
+/// The tradeoff is that the X protocol flags these events as sent, and a
+/// toolkit is free to ignore events carrying that flag. A target that does
+/// ignore them simply does not paste; the chosen item is already on the
+/// clipboard by then, so the user's own Ctrl+V still works. That is the same
+/// fail-safe every other step here follows.
+///
+/// The events go to the focused window rather than the top-level, because
+/// `SendEvent` performs no focus routing of its own: an application's keyboard
+/// focus normally sits on a child window, and that child is what has to
+/// receive them.
+///
+/// Queuing all four without a per-event round trip and confirming them with a
+/// single `sync` keeps the releases behind their presses — one connection's
+/// requests are processed in order — and guarantees a modifier can never be
+/// left logically stuck.
+fn synthesize_ctrl_v<C: Connection>(
+    connection: &C,
+    root: u32,
+    target: u32,
+    keys: PasteKeys,
+) -> bool {
+    // `None`/`PointerRoot` are not windows to send to; the top-level confirmed
+    // moments ago is the honest fallback.
+    let destination = match current_focus(connection) {
+        Some(focus) if focus > 1 && focus != root => focus,
+        _ => target,
     };
 
-    send(KEY_PRESS_EVENT, keys.control);
-    send(KEY_PRESS_EVENT, keys.v);
-    send(KEY_RELEASE_EVENT, keys.v);
-    send(KEY_RELEASE_EVENT, keys.control);
+    let mut queued = true;
+    let mut send = |response_type: u8, detail: u8, state: u16, mask: EventMask| {
+        let event = KeyPressEvent {
+            response_type,
+            detail,
+            sequence: 0,
+            time: x11rb::CURRENT_TIME,
+            root,
+            event: destination,
+            child: 0,
+            root_x: 0,
+            root_y: 0,
+            event_x: 0,
+            event_y: 0,
+            state: state.into(),
+            same_screen: true,
+        };
+        queued &= connection
+            .send_event(false, destination, mask, event)
+            .is_ok();
+    };
+
+    // The modifier is already down when V is pressed, so V carries it in its
+    // state mask: an application reads the combination from that mask, not
+    // from a modifier state it would have to track across events.
+    send(KEY_PRESS_EVENT, keys.control, 0, EventMask::KEY_PRESS);
+    send(KEY_PRESS_EVENT, keys.v, CONTROL_MASK, EventMask::KEY_PRESS);
+    send(
+        KEY_RELEASE_EVENT,
+        keys.v,
+        CONTROL_MASK,
+        EventMask::KEY_RELEASE,
+    );
+    send(KEY_RELEASE_EVENT, keys.control, 0, EventMask::KEY_RELEASE);
 
     queued && connection.sync().is_ok()
 }

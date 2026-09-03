@@ -513,7 +513,57 @@ rebuilt the whole list on each interaction.
 - [x] popup open cost no longer scales with history size;
 - [x] rows beyond the first chunk appear when scrolled or navigated to;
 - [x] selection, keyboard navigation and row actions behave as in Phase 3;
-- [ ] confirmed on the real Zorin GNOME/X11 session from the installed package.
+- [x] confirmed on the real Zorin GNOME/X11 session from the installed
+      package: 504 ms average across 57 recorded opens became 41 ms.
+
+---
+
+## Phase 9 — Auto-paste without the compositor stall
+
+**Status: implemented; measured and confirmed on the target Zorin GNOME/X11
+machine.** No feature, UX, persistence or security behavior changed.
+
+### Goal
+
+Remove the freeze the user sees after choosing an item, which Phase 8 left
+behind and which was visible only with auto-paste enabled.
+
+### Result
+
+Instrumenting the whole selection path showed LionClip was not the slow part:
+restoring to the clipboard took 0.15–0.37 ms, the popup unmapped in 0.6–1.9 ms,
+and Ctrl+V reached the X server 15 ms after the click. Yet the popup visibly
+sat frozen before its close animation even began.
+
+Bisecting it on the real session ruled out, by measurement rather than
+argument: the compositor's close animation (disabling animations changed
+nothing), the target application (it happened in GNOME Text Editor as readily
+as in Electron apps), the popup's own close (`Escape` closes normally), and the
+target not being ready for the keys (a tunable delay before synthesis proved
+purely additive, so waiting only moved the cost). Running the entire paste
+attempt with the key injection removed made the freeze disappear completely,
+which identified it exactly.
+
+XTEST injects into the X server's input pipeline, so every synthesized key is
+also processed by the compositor and by GNOME Shell's extensions. Key synthesis
+now uses core `SendEvent` delivered straight to the focused window, which never
+enters that pipeline. The rest of the backend — target capture, focus
+confirmation, the re-check immediately before synthesis, and every fail-safe
+path — is unchanged.
+
+### Tradeoff
+
+The X protocol flags these events as sent, and a toolkit may ignore them. A
+target that does simply does not paste, and the chosen item is already on the
+clipboard, so the user's own Ctrl+V still works. Confirmed working on the
+target session in both GTK applications and Electron ones.
+
+### Acceptance
+
+- [x] no visible freeze after choosing an item;
+- [x] auto-paste still lands in GTK applications;
+- [x] auto-paste still lands in Electron/Chromium applications;
+- [x] focus confirmation and fail-safe paths unchanged.
 
 ---
 
