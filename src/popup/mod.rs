@@ -3,6 +3,7 @@ mod row;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    time::Instant,
 };
 
 use adw::prelude::*;
@@ -121,6 +122,12 @@ struct PopupState {
     deferred_hide_check: Cell<bool>,
     /// Guards programmatic search-field updates from re-entering the filter.
     updating_search: Cell<bool>,
+    /// When the user chose an item, so the unmap that follows can report how
+    /// long the popup stayed on screen after the choice. `app` already times
+    /// restoring and pasting; this covers the rest of what the user is
+    /// actually waiting on, and separates LionClip's own work from the
+    /// compositor's close handling.
+    chosen_at: Cell<Option<Instant>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -280,6 +287,7 @@ pub fn build(
         suppression_depth: Cell::new(0),
         deferred_hide_check: Cell::new(false),
         updating_search: Cell::new(false),
+        chosen_at: Cell::new(None),
     });
 
     paused_resume.connect_clicked({
@@ -392,6 +400,22 @@ pub fn build(
         move |_| {
             if let Some(state) = state.upgrade() {
                 state.hide_if_inactive();
+            }
+        }
+    });
+
+    window.connect_unmap({
+        let state = Rc::downgrade(&state);
+
+        move |_| {
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            if let Some(chosen) = state.chosen_at.take() {
+                println!(
+                    "lionclip: popup closed after selection unmap_us={}",
+                    chosen.elapsed().as_micros()
+                );
             }
         }
     });
@@ -767,8 +791,16 @@ impl PopupState {
     }
 
     fn restore_item(&self, id: HistoryItemId) {
+        let chosen = Instant::now();
+        self.chosen_at.set(Some(chosen));
         (self.restore)(id);
+        let restored = chosen.elapsed();
         self.hide();
+        println!(
+            "lionclip: selection restore_us={} hide_us={}",
+            restored.as_micros(),
+            chosen.elapsed().as_micros()
+        );
     }
 
     fn toggle_pin(self: &Rc<Self>, id: HistoryItemId) {

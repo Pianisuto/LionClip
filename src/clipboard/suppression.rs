@@ -18,6 +18,19 @@ impl SelfWriteSuppression {
         self.pending = Some(PendingWrite::Image(content_hash.to_owned()));
     }
 
+    /// Consumes a pending self-write without inspecting any payload, for the
+    /// case where the clipboard itself already reports the content as locally
+    /// owned.
+    ///
+    /// LionClip only ever writes to the clipboard from a restore, and every
+    /// restore arms a pending write immediately before writing. So "this
+    /// process owns the content" plus "a write is pending" identifies our own
+    /// restore exactly, and the payload comparison the other checks perform is
+    /// what it would otherwise cost a full selection read to obtain.
+    pub fn take_self_write(&mut self) -> bool {
+        self.pending.take().is_some()
+    }
+
     pub fn should_suppress_text(&mut self, observed_text: &str) -> bool {
         matches!(
             self.pending.take(),
@@ -65,6 +78,30 @@ mod tests {
         suppression.arm_text("restored text");
         assert!(!suppression.should_suppress_text("new external text"));
         assert!(!suppression.should_suppress_text("restored text"));
+    }
+
+    #[test]
+    fn a_locally_owned_change_is_suppressed_once_without_a_payload() {
+        let mut suppression = SelfWriteSuppression::default();
+        suppression.arm_text("restored text");
+        assert!(suppression.take_self_write());
+        // One-shot, exactly like the payload-comparing checks: a second
+        // change is somebody else's even if it is still locally owned.
+        assert!(!suppression.take_self_write());
+    }
+
+    #[test]
+    fn a_locally_owned_change_with_nothing_armed_is_not_suppressed() {
+        let mut suppression = SelfWriteSuppression::default();
+        assert!(!suppression.take_self_write());
+    }
+
+    #[test]
+    fn taking_a_self_write_leaves_nothing_for_the_payload_checks() {
+        let mut suppression = SelfWriteSuppression::default();
+        suppression.arm_image("abc123");
+        assert!(suppression.take_self_write());
+        assert!(!suppression.should_suppress_image("abc123"));
     }
 
     #[test]
