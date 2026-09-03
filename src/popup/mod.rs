@@ -18,6 +18,25 @@ const POPUP_WIDTH: i32 = 430;
 const PLACEHOLDER_HEIGHT: i32 = 128;
 const LIST_MAX_HEIGHT: i32 = 360;
 
+/// How many result rows are built at a time.
+///
+/// `GtkListBox` is not virtualized: it holds a widget per row and measures
+/// every one of them. Building the whole history therefore costs O(items) on
+/// exactly the stretch between the shortcut and the popup appearing — measured
+/// at about 1 ms per item on the GNOME/X11 target, so 500 ms for a full
+/// 500-item history, which is the entire perceived open latency.
+///
+/// Only rows the viewport can reach are built up front; the rest follow when
+/// scrolling or keyboard navigation actually asks for them. The chunk is
+/// several times what [`LIST_MAX_HEIGHT`] can show, so a scroll never runs out
+/// of built rows before the next chunk lands.
+const RENDER_CHUNK: usize = 32;
+
+/// How much unscrolled height may remain below the viewport before the next
+/// chunk is built. Roughly two thirds of a viewport, so growth happens while
+/// there is still content to scroll through rather than at the very bottom.
+const RENDER_AHEAD_PX: f64 = 240.0;
+
 /// Keeps the popup a single rounded surface and reveals row actions on hover,
 /// selection or keyboard focus. Both the toplevel and its content explicitly
 /// paint Adwaita's window color: relying on a transparent toplevel left some
@@ -53,12 +72,10 @@ row:focus-within .lionclip-actions,
 /// `None` when the platform cannot answer.
 type KeyboardFocusProbe = Box<dyn Fn(&adw::ApplicationWindow) -> Option<bool>>;
 
-/// A rendered result: the item it stands for and the buttons the keyboard can
-/// reach inside it.
-struct VisibleRow {
-    id: HistoryItemId,
-    actions: [gtk::Button; 2],
-}
+/// The buttons the keyboard can reach inside one built result row. The item a
+/// row stands for is not repeated here: `matches` already holds it at the same
+/// index.
+type RowActions = [gtk::Button; 2];
 
 pub struct HistoryPopup {
     pub window: adw::ApplicationWindow,
@@ -78,7 +95,16 @@ struct PopupState {
     placeholder_body: gtk::Label,
     paused_indicator: gtk::Box,
     clear_action: gio::SimpleAction,
-    visible: RefCell<Vec<VisibleRow>>,
+    /// Every item the current query matches, in display order. This is the
+    /// list the popup navigates and reports on; `rendered` is the prefix of it
+    /// that currently has widgets.
+    matches: RefCell<Vec<HistoryItemId>>,
+    /// The rows actually built, always a prefix of `matches`, so a list index
+    /// means the same thing in both.
+    rendered: RefCell<Vec<RowActions>>,
+    /// Guards `render_through` against re-entering itself through a signal
+    /// emitted while it is appending rows.
+    rendering: Cell<bool>,
     restore: Box<dyn Fn(HistoryItemId)>,
     open_settings: Box<dyn Fn()>,
     /// Answering `None` falls back to trusting the toplevel's own state.
@@ -239,13 +265,15 @@ pub fn build(
         window: window.clone(),
         search: search.clone(),
         list: list.clone(),
-        scrolled,
+        scrolled: scrolled.clone(),
         placeholder,
         placeholder_title,
         placeholder_body,
         paused_indicator,
         clear_action: clear_action.clone(),
-        visible: RefCell::new(Vec::new()),
+        matches: RefCell::new(Vec::new()),
+        rendered: RefCell::new(Vec::new()),
+        rendering: Cell::new(false),
         restore: Box::new(on_restore),
         open_settings: Box::new(on_open_settings),
         keeps_keyboard_focus: Box::new(keeps_keyboard_focus),
@@ -264,6 +292,19 @@ pub fn build(
             state.settings.set_recording_paused(false);
             state.writer.cancel_pending_self_write();
             state.update_paused_indicator();
+        }
+    });
+
+    // Building rows on demand needs a signal for "the user reached the end of
+    // what is built". The adjustment reports both scrolling and the resize a
+    // freshly appended chunk causes, which is exactly when to check.
+    scrolled.vadjustment().connect_value_changed({
+        let state = Rc::downgrade(&state);
+
+        move |_| {
+            if let Some(state) = state.upgrade() {
+                state.render_more_if_near_end();
+            }
         }
     });
 
@@ -413,26 +454,73 @@ impl PopupState {
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
+        self.rendered.borrow_mut().clear();
 
-        let mut visible = Vec::new();
-        {
+        let matches: Vec<HistoryItemId> = {
             let history = self.history.borrow();
             self.clear_action.set_enabled(history.has_unpinned());
+            let matches = history
+                .search(&query)
+                .into_iter()
+                .map(TextHistoryItem::id)
+                .collect::<Vec<_>>();
+            self.update_placeholder(history.items().is_empty(), matches.is_empty());
+            matches
+        };
+        *self.matches.borrow_mut() = matches;
 
-            for item in history.search(&query) {
-                let widgets = self.build_row(item);
-                self.list.append(&widgets.row);
-                visible.push(VisibleRow {
-                    id: item.id(),
-                    actions: widgets.actions,
-                });
-            }
-
-            self.update_placeholder(history.items().is_empty(), visible.is_empty());
-        }
-        *self.visible.borrow_mut() = visible;
-
+        self.render_through(RENDER_CHUNK);
         self.restore_selection(prefer, fallback_index, keep_list_focus);
+    }
+
+    /// Builds result rows until `count` of them exist, starting from the first
+    /// match that has no widget yet. See [`RENDER_CHUNK`] for why the whole
+    /// match list is not built at once.
+    ///
+    /// Stops early if a match has disappeared from the history rather than
+    /// skipping it, so the built rows stay an exact prefix of `matches` and a
+    /// list index keeps meaning the same thing in both.
+    fn render_through(self: &Rc<Self>, count: usize) {
+        if self.rendering.replace(true) {
+            return;
+        }
+
+        {
+            let matches = self.matches.borrow();
+            let mut rendered = self.rendered.borrow_mut();
+            let target = count.min(matches.len());
+
+            if rendered.len() < target {
+                let history = self.history.borrow();
+                for id in &matches[rendered.len()..target] {
+                    let Some(item) = history.item(*id) else {
+                        break;
+                    };
+                    let widgets = self.build_row(item);
+                    self.list.append(&widgets.row);
+                    rendered.push(widgets.actions);
+                }
+            }
+        }
+
+        self.rendering.set(false);
+    }
+
+    /// Builds the next chunk when scrolling has come within
+    /// [`RENDER_AHEAD_PX`] of the last built row.
+    fn render_more_if_near_end(self: &Rc<Self>) {
+        let rendered = self.rendered.borrow().len();
+        let adjustment = self.scrolled.vadjustment();
+        if !should_render_more(
+            rendered,
+            self.matches.borrow().len(),
+            adjustment.value(),
+            adjustment.page_size(),
+            adjustment.upper(),
+        ) {
+            return;
+        }
+        self.render_through(rendered + RENDER_CHUNK);
     }
 
     fn build_row(self: &Rc<Self>, item: &TextHistoryItem) -> row::RowWidgets {
@@ -486,12 +574,12 @@ impl PopupState {
     }
 
     fn restore_selection(
-        &self,
+        self: &Rc<Self>,
         prefer: Option<HistoryItemId>,
         fallback_index: usize,
         keep_list_focus: bool,
     ) {
-        let count = self.visible.borrow().len();
+        let count = self.matches.borrow().len();
         if count == 0 {
             self.focus_search();
             return;
@@ -499,6 +587,8 @@ impl PopupState {
 
         let preferred_index = prefer.and_then(|id| self.index_of(id));
         let index = preferred_index.unwrap_or(fallback_index).min(count - 1);
+        // A pin or delete can put the item to reselect past the built rows.
+        self.render_through(index + 1);
         let Some(row) = self.row_at(index) else {
             return;
         };
@@ -623,11 +713,11 @@ impl PopupState {
             return;
         };
         let actions = {
-            let visible = self.visible.borrow();
-            let Some(row) = visible.get(index) else {
+            let rendered = self.rendered.borrow();
+            let Some(actions) = rendered.get(index) else {
                 return;
             };
-            row.actions.clone()
+            actions.clone()
         };
 
         let focused = actions.iter().position(|action| self.focus_within(action));
@@ -646,8 +736,8 @@ impl PopupState {
         }
     }
 
-    fn move_selection(&self, delta: i32) {
-        let count = self.visible.borrow().len();
+    fn move_selection(self: &Rc<Self>, delta: i32) {
+        let count = self.matches.borrow().len();
         if count == 0 {
             self.focus_search();
             return;
@@ -823,7 +913,10 @@ impl PopupState {
         self.window.set_focus_visible(true);
     }
 
-    fn focus_row(&self, index: usize) {
+    fn focus_row(self: &Rc<Self>, index: usize) {
+        // Keyboard navigation can walk past the built rows; build ahead so the
+        // next presses do not each pay for a chunk.
+        self.render_through(index + RENDER_CHUNK);
         if let Some(row) = self.row_at(index) {
             self.list.select_row(Some(&row));
             self.grab_focus_visibly(&row);
@@ -861,16 +954,16 @@ impl PopupState {
     }
 
     fn index_of(&self, id: HistoryItemId) -> Option<usize> {
-        self.visible
+        self.matches
             .borrow()
             .iter()
-            .position(|candidate| candidate.id == id)
+            .position(|candidate| *candidate == id)
     }
 
     fn id_at(&self, index: i32) -> Option<HistoryItemId> {
         usize::try_from(index)
             .ok()
-            .and_then(|index| self.visible.borrow().get(index).map(|row| row.id))
+            .and_then(|index| self.matches.borrow().get(index).copied())
     }
 
     fn selected_index(&self) -> Option<usize> {
@@ -881,7 +974,7 @@ impl PopupState {
 
     fn selected_id(&self) -> Option<HistoryItemId> {
         let index = self.selected_index()?;
-        self.visible.borrow().get(index).map(|row| row.id)
+        self.matches.borrow().get(index).copied()
     }
 
     fn set_search_text(&self, text: &str) {
@@ -893,6 +986,30 @@ impl PopupState {
         self.search.set_text(text);
         self.updating_search.set(false);
     }
+}
+
+/// Whether another chunk of rows should be built for a viewport showing
+/// `value..value + page_size` of `upper`, with `rendered` of `total` matches
+/// already built.
+///
+/// Pure so the growth rule is testable without a display: everything it needs
+/// is the scroll geometry GTK reports and the two counts.
+///
+/// A zero `page_size` means the viewport has not been allocated yet, which is
+/// exactly the state a fresh rebuild leaves behind when it resets the scroll
+/// position. Reading that as "scrolled to the end" would build a second chunk
+/// on every open, for a viewport nobody has scrolled.
+fn should_render_more(
+    rendered: usize,
+    total: usize,
+    value: f64,
+    page_size: f64,
+    upper: f64,
+) -> bool {
+    if rendered >= total || page_size <= 0.0 {
+        return false;
+    }
+    value + page_size >= upper - RENDER_AHEAD_PX
 }
 
 fn install_style(display: &gdk::Display) {
@@ -907,7 +1024,45 @@ fn install_style(display: &gdk::Display) {
 
 #[cfg(test)]
 mod tests {
-    use super::POPUP_CSS;
+    use super::{POPUP_CSS, RENDER_AHEAD_PX, should_render_more};
+
+    #[test]
+    fn a_viewport_far_from_the_end_builds_no_further_rows() {
+        assert!(!should_render_more(32, 500, 0.0, 360.0, 2000.0));
+    }
+
+    #[test]
+    fn approaching_the_last_built_row_builds_the_next_chunk() {
+        assert!(should_render_more(
+            32,
+            500,
+            2000.0 - 360.0 - RENDER_AHEAD_PX,
+            360.0,
+            2000.0
+        ));
+    }
+
+    #[test]
+    fn everything_already_built_never_grows_again() {
+        assert!(!should_render_more(500, 500, 1640.0, 360.0, 2000.0));
+        // Not even at the very bottom of the scroll.
+        assert!(!should_render_more(500, 500, 1640.0, 360.0, 1640.0));
+    }
+
+    #[test]
+    fn an_unallocated_viewport_never_grows() {
+        // What a rebuild leaves behind before the list is allocated: taking it
+        // for "scrolled to the end" would build a second chunk on every open.
+        assert!(!should_render_more(32, 500, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_reset_scroll_over_stale_geometry_never_grows() {
+        // The adjustment still describes the previous open's rows when the
+        // rebuild resets the position; the top of any scrollable list is far
+        // from its end.
+        assert!(!should_render_more(32, 500, 0.0, 360.0, 1500.0));
+    }
 
     #[test]
     fn popup_surface_has_a_theme_background_without_a_transparent_toplevel() {
