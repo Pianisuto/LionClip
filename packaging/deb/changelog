@@ -1,3 +1,22 @@
+lionclip (0.2.0) noble; urgency=medium
+
+  * Popup opening no longer costs more as the history grows: result rows are
+    built in chunks and extended on scroll, instead of building and measuring
+    every stored item on each open. Measured on Zorin GNOME/X11 with a full
+    500-item history, 504 ms became 41 ms. Search, pin and delete rebuild the
+    list too, and gain the same reduction.
+  * Auto-paste no longer freezes the screen after choosing an item. Key
+    synthesis moved from the XTEST extension to core SendEvent, so the
+    compositor and its shell extensions no longer process each synthesized
+    key. Note that a client which ignores events flagged as synthetic no
+    longer receives the paste; the chosen item is still placed on the
+    clipboard, so a manual Ctrl+V always works.
+  * Restoring an item no longer reads its own payload back out of the X
+    selection to identify it, which for an image meant decoding and re-hashing
+    up to 25 MiB on a latency-sensitive path.
+
+ -- Leonardo Vulczak <leonardovulczak@gmail.com>  Thu, 03 Sep 2026 00:00:00 +0000
+
 lionclip (0.1.0) noble; urgency=medium
 
   * Desktop integration: final application ID, desktop entry, icon, autostart
