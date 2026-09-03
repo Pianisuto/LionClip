@@ -466,6 +466,55 @@ Pinning `width_chars` on the preview label makes layout 3× faster (462 ms →
 155 ms) but widens the popup from 430 px to 480 px, so it was rejected: Phase 7
 does not change UX.
 
+**Resolved in Phase 8 without replacing the list**, by building fewer rows
+rather than measuring them faster.
+
+---
+
+## Phase 8 — Incremental result rendering
+
+**Status: implemented; measured. Pending manual validation on the target Zorin
+GNOME/X11 machine.** No feature, UX, persistence or security behavior changed.
+
+### Goal
+
+Close the bottleneck Phase 7 documented and left open: the popup open cost that
+scales with the number of history items.
+
+### Result
+
+Fifty-seven real popup opens recorded on the target session averaged **504 ms**,
+of which **494 ms** was `prepare` + `present` — about 1 ms per history item, at
+the 500-item default limit. The list was being built in full on every open,
+every keystroke in the search field, and every pin or delete, while at most
+about nine rows fit in the 360 px viewport.
+
+`GtkListBox` still holds a widget per row and still measures every one it
+holds; it is now only ever given the rows the user can reach. A rebuild builds
+one chunk of 32, and scrolling or keyboard navigation past the built rows
+builds the next chunk. The popup keeps `GtkListBox`, so selection, keyboard
+navigation, row actions and index handling are untouched — the built rows are
+always an exact prefix of the match list, so a list index still means the same
+thing everywhere.
+
+### Measured, same 500-item history, release build, isolated X server
+
+| Popup open phase | Before | After |
+| --- | --- | --- |
+| `prepare` (build rows) | 31 ms | 3 ms |
+| `present` (GTK layout) | 379 ms | 47 ms |
+| **total** | **426 ms** | **62 ms** |
+
+The same reduction applies to every search keystroke and to pin/delete, which
+rebuilt the whole list on each interaction.
+
+### Acceptance
+
+- [x] popup open cost no longer scales with history size;
+- [x] rows beyond the first chunk appear when scrolled or navigated to;
+- [x] selection, keyboard navigation and row actions behave as in Phase 3;
+- [ ] confirmed on the real Zorin GNOME/X11 session from the installed package.
+
 ---
 
 ## Post-V1 ideas — not committed
